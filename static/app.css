@@ -1,0 +1,71 @@
+/* fakecss:/home/osmarks/Programming/ewo3/src/App.esbuild-svelte-fake-css */
+* {
+  box-sizing: border-box;
+}
+html {
+  scrollbar-color: black lightgray;
+}
+body {
+  font-family:
+    "Fira Sans",
+    "Noto Sans",
+    "Segoe UI",
+    Verdana,
+    sans-serif;
+  font-weight: 300;
+  overflow-anchor: none;
+}
+strong {
+  font-weight: bold;
+}
+h1 {
+  border-bottom: 1px solid gray;
+  margin: 0;
+  margin-bottom: 0.5em;
+  font-weight: 500;
+}
+h2 {
+  border-bottom: 1px solid gray;
+  margin: 0;
+  margin-bottom: 0.5em;
+  font-weight: 500;
+}
+h3 {
+  border-bottom: 1px solid gray;
+  margin: 0;
+  margin-bottom: 0.5em;
+  font-weight: 500;
+}
+h4 {
+  border-bottom: 1px solid gray;
+  margin: 0;
+  margin-bottom: 0.5em;
+  font-weight: 500;
+}
+h5 {
+  border-bottom: 1px solid gray;
+  margin: 0;
+  margin-bottom: 0.5em;
+  font-weight: 500;
+}
+h6 {
+  border-bottom: 1px solid gray;
+  margin: 0;
+  margin-bottom: 0.5em;
+  font-weight: 500;
+}
+ul {
+  list-style-type: square;
+  padding: 0;
+  padding-left: 1em;
+}
+.game-display.svelte-oncm9j .row.svelte-oncm9j {
+  white-space: nowrap;
+}
+.game-display.svelte-oncm9j .row .cell.svelte-oncm9j {
+  display: inline-block;
+  text-align: center;
+}
+.wrapper.svelte-oncm9j.svelte-oncm9j {
+  display: flex;
+}

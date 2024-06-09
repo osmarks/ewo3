@@ -1,0 +1,22 @@
+[package]
+name = "ewo3"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+hecs = { version = "0.10", features = ["column-serialize"] }
+euclid = { version = "0.22", features = ["serde"] }
+fastrand = "2"
+tokio-tungstenite = "0.23"
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+tokio-macros = { version = "0.2.0-alpha.6" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+slab = "0.4"
+lazy_static = "1"
+seahash = "4"
+noise-functions = "0.2"
