@@ -1,12 +1,13 @@
-use hecs::{Entity, World};
+use hecs::{CommandBuffer, Entity, World};
 use euclid::{Point3D, Point2D, Vector2D};
 use futures_util::{stream::TryStreamExt, SinkExt, StreamExt};
+use indexmap::IndexMap;
 use noise_functions::Sample3;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio::sync::{mpsc, Mutex};
 use anyhow::{Result, Context, anyhow};
-use std::{collections::{hash_map::Entry, HashMap}, hash::{Hash, Hasher}, net::SocketAddr, sync::Arc, thread::current, time::Duration};
+use std::{collections::{hash_map::Entry, HashMap, HashSet, VecDeque}, convert::TryFrom, hash::{Hash, Hasher}, net::SocketAddr, sync::Arc, time::Duration};
 use slab::Slab;
 use serde::{Serialize, Deserialize};
 
@@ -90,8 +91,9 @@ enum Input {
 #[derive(Serialize, Deserialize, Clone)]
 enum Frame {
     Dead,
-    Display { nearby: Vec<(i64, i64, char, f32)>, health: f32 },
-    PlayerCount(usize)
+    Display { nearby: Vec<(i64, i64, char, f32)>, health: f32, inventory: Vec<(String, String, u64)> },
+    PlayerCount(usize),
+    Message(String)
 }
 
 struct Client {
@@ -106,22 +108,58 @@ struct GameState {
     ticks: u64
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Item {
+    Dirt,
+    Bone
+}
 
+impl Item {
+    fn name(&self) -> &'static str {
+        use Item::*;
+        match self {
+            Dirt => "Dirt",
+            Bone => "Bone"
+        }
+    }
+
+    fn description(&self) -> &'static str {
+        use Item::*;
+        match self {
+            Dirt => "It's from the ground. You're carrying it for some reason.",
+            Bone => "Disassembling your enemies for resources is probably ethical."
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 struct PlayerCharacter;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct Position(Coord);
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct Position(VecDeque<Coord>);
+
+impl Position {
+    fn head(&self) -> Coord {
+        *self.0.front().unwrap()
+    }
+
+    fn single_tile(c: Coord) -> Self {
+        Self(VecDeque::from([c]))
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct MovingInto(Coord);
 
 #[derive(Debug, Clone)]
 struct Health(f32, f32);
+
+impl Health {
+    fn pct(&self) -> f32 {
+        if self.1 == 0.0 { 0.0 }
+        else { self.0 / self.1 }
+    }
+}
 
 #[derive(Debug, Clone)]
 struct Render(char);
@@ -154,19 +192,16 @@ struct Collidable;
 struct Velocity(CoordVec);
 
 #[derive(Debug, Clone)]
-struct DeferredRandomly<T: Clone + std::fmt::Debug + hecs::Bundle>(u64, T);
-
-#[derive(Debug, Clone)]
 struct Terrain;
 
 #[derive(Debug, Clone)]
-struct Obstruction { entry_cost: StochasticNumber, exit_cost: StochasticNumber }
+struct Obstruction { entry_multiplier: f32, exit_multiplier: f32 }
 
 #[derive(Debug, Clone)]
 struct Energy { current: f32, regeneration_rate: f32, burst: f32 }
 
 #[derive(Debug, Clone)]
-struct DespawnOnImpact;
+struct Drops(Vec<(Item, StochasticNumber)>);
 
 impl Energy {
     fn try_consume(&mut self, cost: f32) -> bool {
@@ -176,6 +211,46 @@ impl Energy {
         } else {
             false
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DespawnOnImpact;
+
+#[derive(Debug, Clone)]
+struct Inventory(indexmap::IndexMap<Item, u64>);
+
+impl Inventory {
+    fn add(&mut self, item: Item, qty: u64) {
+        *self.0.entry(item).or_default() += qty;
+    }
+
+    fn take(&mut self, item: Item, qty: u64) -> bool {
+        match self.0.entry(item) {
+            indexmap::map::Entry::Occupied(mut o) => {
+                let current = o.get_mut();
+                if *current >= qty {
+                    *current -= qty;
+                    return true;
+                }
+                return false;
+            },
+            indexmap::map::Entry::Vacant(_) => return false
+        }
+    }
+
+    fn extend(&mut self, other: &Inventory) {
+        for (item, count) in other.0.iter() {
+            self.add(item.clone(), *count);
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.iter().any(|(_, c)| *c > 0)
+    }
+
+    fn empty() -> Self {
+        Self(IndexMap::new())
     }
 }
 
@@ -239,21 +314,22 @@ struct EnemySpec {
     initial_health: f32,
     move_delay: usize,
     attack_cooldown: u64,
-    ranged: bool
+    ranged: bool,
+    drops: Vec<(Item, StochasticNumber)>
 }
 
 impl EnemySpec {
     // Numbers ported from original EWO. Fudge constants added elsewhere. 
     fn random() -> EnemySpec {
         match fastrand::usize(0..650) {
-            0..=99 => EnemySpec { symbol: 'I', min_damage: 10.0, damage_range: 5.0, initial_health: 50.0, move_delay: 70, attack_cooldown: 10, ranged: false }, // IBIS
-            100..=199 => EnemySpec { symbol: 'K', min_damage: 5.0, damage_range: 15.0, initial_health: 30.0, move_delay: 40, attack_cooldown: 10, ranged: false }, // KESTREL
-            200..=299 => EnemySpec { symbol: 'S', min_damage: 5.0, damage_range: 5.0, initial_health: 20.0, move_delay: 50, attack_cooldown: 10, ranged: false }, // SNAKE
-            300..=399 => EnemySpec { symbol: 'E', min_damage: 10.0, damage_range: 20.0, initial_health: 80.0, move_delay: 80, attack_cooldown: 10, ranged: false }, // EMU
-            400..=499 => EnemySpec { symbol: 'O', min_damage: 8.0, damage_range: 17.0, initial_health: 150.0, move_delay: 100, attack_cooldown: 10, ranged: false }, // OGRE
-            500..=599 => EnemySpec { symbol: 'R', min_damage: 5.0, damage_range: 5.0, initial_health: 15.0, move_delay: 40, attack_cooldown: 10, ranged: false }, // RAT
-            600..=609 => EnemySpec { symbol: 'M' , min_damage: 20.0, damage_range: 10.0, initial_health: 150.0, move_delay: 70, attack_cooldown: 10, ranged: false }, // MOA
-            610..=649 => EnemySpec { symbol: 'P', min_damage: 10.0, damage_range: 5.0, initial_health: 15.0, move_delay: 20, attack_cooldown: 10, ranged: true }, // PLATYPUS
+            0..=99 => EnemySpec { symbol: 'I', min_damage: 10.0, damage_range: 5.0, initial_health: 50.0, move_delay: 70, attack_cooldown: 10, ranged: false, drops: vec![] }, // IBIS
+            100..=199 => EnemySpec { symbol: 'K', min_damage: 5.0, damage_range: 15.0, initial_health: 30.0, move_delay: 40, attack_cooldown: 10, ranged: false, drops: vec![] }, // KESTREL
+            200..=299 => EnemySpec { symbol: 'S', min_damage: 5.0, damage_range: 5.0, initial_health: 20.0, move_delay: 50, attack_cooldown: 10, ranged: false, drops: vec![] }, // SNAKE
+            300..=399 => EnemySpec { symbol: 'E', min_damage: 10.0, damage_range: 20.0, initial_health: 80.0, move_delay: 80, attack_cooldown: 10, ranged: false, drops: vec![] }, // EMU
+            400..=499 => EnemySpec { symbol: 'O', min_damage: 8.0, damage_range: 17.0, initial_health: 150.0, move_delay: 100, attack_cooldown: 10, ranged: false, drops: vec![] }, // OGRE
+            500..=599 => EnemySpec { symbol: 'R', min_damage: 5.0, damage_range: 5.0, initial_health: 15.0, move_delay: 40, attack_cooldown: 10, ranged: false, drops: vec![] }, // RAT
+            600..=609 => EnemySpec { symbol: 'M' , min_damage: 20.0, damage_range: 10.0, initial_health: 150.0, move_delay: 70, attack_cooldown: 10, ranged: false, drops: vec![] }, // MOA
+            610..=649 => EnemySpec { symbol: 'P', min_damage: 10.0, damage_range: 5.0, initial_health: 15.0, move_delay: 20, attack_cooldown: 10, ranged: true, drops: vec![] }, // PLATYPUS
             _ => unreachable!()
         }
     }
@@ -308,6 +384,10 @@ impl StochasticNumber {
         }
     }
 
+    fn sample_rounded<T: TryFrom<i128>>(&self) -> T {
+        T::try_from(self.sample().round() as i128).map_err(|_| "convert fail").unwrap()
+    }
+
     fn triangle_from_min_range(min: f32, range: f32) -> Self {
         StochasticNumber::Triangle { min: min, max: min + range, mode: (min + range) / 2.0 }
     }
@@ -318,41 +398,48 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
     let mut positions = HashMap::new();
 
     for (entity, pos) in state.world.query_mut::<hecs::With<&Position, &Collidable>>() {
-        positions.insert(pos.0, entity);
+        for subpos in pos.0.iter() {
+            positions.insert(*subpos, entity);
+        }
     }
 
     for (entity, pos) in state.world.query_mut::<hecs::With<&Position, &Terrain>>() {
-        terrain_positions.insert(pos.0, entity);
+        for subpos in pos.0.iter() {
+            terrain_positions.insert(*subpos, entity);
+        }
     }
 
     let mut buffer = hecs::CommandBuffer::new();
 
     // Spawn enemies
-    for (_entity, (Position(pos), EnemyTarget { spawn_range, spawn_density, spawn_rate_inv, .. })) in state.world.query::<(&Position, &EnemyTarget)>().iter() {
+    for (_entity, (pos, EnemyTarget { spawn_range, spawn_density, spawn_rate_inv, .. })) in state.world.query::<(&Position, &EnemyTarget)>().iter() {
+        let pos = pos.head();
         if fastrand::usize(0..*spawn_rate_inv) == 0 {
             let c = count_hexes(*spawn_range.end());
-            let mut newpos = *pos + sample_range(*spawn_range.end());
+            let mut newpos = pos + sample_range(*spawn_range.end());
             let mut occupied = false;
             for _ in 0..(c as f32 / spawn_density * 0.005).ceil() as usize {
                 if positions.contains_key(&newpos) {
                     occupied = true;
                     break;
                 }
-                newpos = *pos + sample_range(*spawn_range.end());
+                newpos = pos + sample_range(*spawn_range.end());
             }
-            if !occupied && get_base_terrain(newpos).can_enter() && hex_distance(newpos, *pos) >= *spawn_range.start() {
-                let spec = EnemySpec::random();
+            if !occupied && get_base_terrain(newpos).can_enter() && hex_distance(newpos, pos) >= *spawn_range.start() {
+                let mut spec = EnemySpec::random();
+                spec.drops.push((Item::Bone, StochasticNumber::Triangle { min: 0.7 * spec.initial_health / 40.0, max: 1.3 * spec.initial_health / 40.0, mode: spec.initial_health / 40.0 }));
                 if spec.ranged {
                     buffer.spawn((
                         Render(spec.symbol),
                         Health(spec.initial_health, spec.initial_health),
                         Enemy,
                         RangedAttack { damage: StochasticNumber::triangle_from_min_range(spec.min_damage, spec.damage_range), energy: spec.attack_cooldown as f32, range: 4 },
-                        Position(newpos),
+                        Position::single_tile(newpos),
                         MoveCost(StochasticNumber::Triangle { min: 0.0, max: 2.0 * spec.move_delay as f32 / 3.0, mode: spec.move_delay as f32 / 3.0 }),
                         Collidable,
                         DespawnRandomly(RANDOM_DESPAWN_INV_RATE),
-                        Energy { regeneration_rate: 1.0, current: 0.0, burst: 0.0 }
+                        Energy { regeneration_rate: 1.0, current: 0.0, burst: 0.0 },
+                        Drops(spec.drops)
                     ));
                 } else {
                     buffer.spawn((
@@ -360,11 +447,12 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                         Health(spec.initial_health, spec.initial_health),
                         Enemy,
                         Attack { damage: StochasticNumber::triangle_from_min_range(spec.min_damage, spec.damage_range), energy: spec.attack_cooldown as f32 },
-                        Position(newpos),
+                        Position::single_tile(newpos),
                         MoveCost(StochasticNumber::Triangle { min: 0.0, max: 2.0 * spec.move_delay as f32 / 3.0, mode: spec.move_delay as f32 / 3.0 }),
                         Collidable,
                         DespawnRandomly(RANDOM_DESPAWN_INV_RATE),
-                        Energy { regeneration_rate: 1.0, current: 0.0, burst: 0.0 }
+                        Energy { regeneration_rate: 1.0, current: 0.0, burst: 0.0 },
+                        Drops(spec.drops)
                     ));
                 }
             }
@@ -372,11 +460,13 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
     }
 
     // Process enemy motion and ranged attacks
-    for (entity, (Position(pos), ranged, energy)) in state.world.query::<hecs::With<(&Position, Option<&mut RangedAttack>, Option<&mut Energy>), &Enemy>>().iter() {
+    for (entity, (pos, ranged, energy)) in state.world.query::<hecs::With<(&Position, Option<&mut RangedAttack>, Option<&mut Energy>), &Enemy>>().iter() {
+        let pos = pos.head();
+
         for direction in DIRECTIONS.iter() {
-            if let Some(target) = positions.get(&(*pos + *direction)) {
+            if let Some(target) = positions.get(&(pos + *direction)) {
                 if let Ok(_) = state.world.get::<&EnemyTarget>(*target) {
-                    buffer.insert_one(entity, MovingInto(*pos + *direction));
+                    buffer.insert_one(entity, MovingInto(pos + *direction));
                     continue;
                 }
             }
@@ -386,11 +476,12 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
 
         // TODO we maybe need a spatial index for this
         for (_entity, (target_pos, target)) in state.world.query::<(&Position, &EnemyTarget)>().iter() {
-            let distance = hex_distance(*pos, target_pos.0);
+            let target_pos = target_pos.head();
+            let distance = hex_distance(pos, target_pos);
             if distance < target.aggression_range {
                 match closest {
-                    Some((_pos, old_distance)) if old_distance < distance => closest = Some((target_pos.0, distance)),
-                    None => closest = Some((target_pos.0, distance)),
+                    Some((_pos, old_distance)) if old_distance < distance => closest = Some((target_pos, distance)),
+                    None => closest = Some((target_pos, distance)),
                     _ => ()
                 }
             }
@@ -400,10 +491,10 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
             if let Some(ranged_attack) = ranged {
                 // slightly smart behaviour for ranged attacker: try to stay just within range
                 let direction = DIRECTIONS.iter().min_by_key(|dir|
-                    (hex_distance(*pos + **dir, target_pos) - (ranged_attack.range as i64 - 1)).abs()).unwrap();
-                buffer.insert_one(entity, MovingInto(*pos + *direction));
+                    (hex_distance(pos + **dir, target_pos) - (ranged_attack.range as i64 - 1)).abs()).unwrap();
+                buffer.insert_one(entity, MovingInto(pos + *direction));
                 // do ranged attack if valid
-                let atk_dir = target_pos - *pos;
+                let atk_dir = target_pos - pos;
                 if on_axis(atk_dir) && (energy.is_none() || energy.unwrap().try_consume(ranged_attack.energy)) {
                     let atk_dir = atk_dir.clamp(-CoordVec::one(), CoordVec::one());
                     buffer.spawn((
@@ -411,23 +502,23 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                         Enemy,
                         Attack { damage: ranged_attack.damage, energy: 0.0 },
                         Velocity(atk_dir),
-                        Position(*pos),
+                        Position::single_tile(pos),
                         DespawnOnTick(state.ticks.wrapping_add(ranged_attack.range))
                     ));
                 }
             } else {
-                let direction = DIRECTIONS.iter().min_by_key(|dir| hex_distance(*pos + **dir, target_pos)).unwrap();
-                buffer.insert_one(entity, MovingInto(*pos + *direction));
+                let direction = DIRECTIONS.iter().min_by_key(|dir| hex_distance(pos + **dir, target_pos)).unwrap();
+                buffer.insert_one(entity, MovingInto(pos + *direction));
             }
         } else {
             // wander randomly (ethical)
-            buffer.insert_one(entity, MovingInto(*pos + *fastrand::choice(DIRECTIONS).unwrap()));
+            buffer.insert_one(entity, MovingInto(pos + *fastrand::choice(DIRECTIONS).unwrap()));
         }
     }
 
     // Process velocity
-    for (entity, (Position(pos), Velocity(vel))) in state.world.query_mut::<(&Position, &Velocity)>() {
-        buffer.insert_one(entity, MovingInto(*pos + *vel));
+    for (entity, (pos, Velocity(vel))) in state.world.query_mut::<(&Position, &Velocity)>() {
+        buffer.insert_one(entity, MovingInto(pos.head() + *vel));
     }
 
     buffer.run_on(&mut state.world);
@@ -435,6 +526,9 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
     // Process inputs
     for (_id, client) in state.clients.iter_mut() {
         let mut next_movement = CoordVec::zero();
+        let position = state.world.get::<&Position>(client.entity)?.head();
+        let mut energy = state.world.get::<&mut Energy>(client.entity)?;
+        let mut inventory = state.world.get::<&mut Inventory>(client.entity)?;
         loop {
             let recv = client.inputs_rx.try_recv();
             match recv {
@@ -447,28 +541,81 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                     Input::DownRight => next_movement = CoordVec::new(0, 1),
                     Input::DownLeft => next_movement = CoordVec::new(-1, 1),
                     Input::Dig => {
-
+                        if terrain_positions.get(&position).is_none() && energy.try_consume(5.0) {
+                            buffer.spawn((
+                                Terrain,
+                                Render('_'),
+                                Obstruction { entry_multiplier: 5.0, exit_multiplier: 5.0 },
+                                DespawnOnTick(state.ticks.wrapping_add(StochasticNumber::triangle_from_min_range(5000.0, 5000.0).sample().round() as u64)),
+                                Position::single_tile(position)
+                            ));
+                            inventory.add(Item::Dirt, StochasticNumber::triangle_from_min_range(1.0, 3.0).sample_rounded());
+                        }
                     }
                 },
                 Err(e) => return Err(e.into())
             }
         }
-        let position = state.world.get::<&mut Position>(client.entity)?.0;
+        
         let target = position + next_movement;
         if get_base_terrain(target).can_enter() && target != position {
-            state.world.insert_one(client.entity, MovingInto(target)).unwrap();
+            buffer.insert_one(client.entity, MovingInto(target));
         }
     }
 
-    // Process motion and attacks
-    for (entity, (Position(current_pos), MovingInto(target_pos), damage, mut energy, move_cost, despawn_on_impact)) in state.world.query::<(&mut Position, &MovingInto, Option<&mut Attack>, Option<&mut Energy>, Option<&MoveCost>, Option<&DespawnOnImpact>)>().iter() {
-        let mut move_cost = move_cost.map(|x| x.0.sample()).unwrap_or(0.0);
-        if let Some(current_terrain) = terrain_positions.get(current_pos) {
-            move_cost += 1.0;
+    buffer.run_on(&mut state.world);
+
+    let mut despawn_buffer = HashSet::new();
+
+    // This might lead to a duping glitch, which would at least be funny.
+    let kill = |buffer: &mut CommandBuffer, despawn_buffer: &mut HashSet<Entity>, state: &GameState, entity: Entity, killer: Option<Entity>, position: Option<Coord>| {
+        let position = position.unwrap_or_else(|| state.world.get::<&Position>(entity).unwrap().head());
+        despawn_buffer.insert(entity);
+        buffer.despawn(entity);
+        let mut materialized_drops = Inventory::empty();
+        if let Ok(drops) = state.world.get::<&Drops>(entity) {
+            for (drop, frequency) in drops.0.iter() {
+                materialized_drops.add(drop.clone(), frequency.sample_rounded())
+            }
         }
-        // TODO will break attacks kind of, desirable? Doubtful.
+        if let Ok(other_inv) = state.world.get::<&Inventory>(entity) {
+            materialized_drops.extend(&other_inv);
+        }
+        let killer_consumed_items = if let Some(killer) = killer {
+            if let Ok(mut inv) = state.world.get::<&mut Inventory>(killer) {
+                inv.extend(&materialized_drops);
+                true
+            } else {
+                false
+            }
+        } else { false };
+        if !killer_consumed_items && !materialized_drops.is_empty() {
+            buffer.spawn((
+                Position::single_tile(position),
+                Render('☒'),
+                materialized_drops
+            ));
+        }
+    };
+
+    // Process motion and attacks
+    for (entity, (current_pos, MovingInto(target_pos), damage, mut energy, move_cost, despawn_on_impact)) in state.world.query::<(&mut Position, &MovingInto, Option<&mut Attack>, Option<&mut Energy>, Option<&MoveCost>, Option<&DespawnOnImpact>)>().iter() {
+        let mut move_cost = move_cost.map(|x| x.0.sample()).unwrap_or(0.0);
+        
+        for tile in current_pos.0.iter() {
+            // TODO: perhaps large enemies should not be exponentially more vulnerable to environmental hazards
+            if let Some(current_terrain) = terrain_positions.get(tile) {
+                if let Ok(obstruction) = state.world.get::<&Obstruction>(*current_terrain) {
+                    move_cost *= obstruction.exit_multiplier;
+                }
+            }
+        }
+
+        // TODO: attacks into obstructions are still cheap; is this desirable?
         if let Some(target_terrain) = terrain_positions.get(target_pos) {
-            move_cost += 1.0;
+            if let Ok(obstruction) = state.world.get::<&Obstruction>(*target_terrain) {
+                move_cost *= obstruction.entry_multiplier;
+            }
         }
 
         if get_base_terrain(*target_pos).can_enter() {
@@ -485,16 +632,16 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                             _ => ()
                         }
                         if despawn_on_impact.is_some() {
-                            buffer.despawn(entity);
+                            kill(&mut buffer, &mut despawn_buffer, &state, entity, Some(target_entity), Some(*target_pos));
                         }
-                        if x.0 <= 0.0 {
-                            buffer.despawn(target_entity);
+                        if x.0 < 0.0 {
+                            kill(&mut buffer, &mut despawn_buffer, &state, target_entity, Some(entity), Some(*target_pos));
                             Some(Entry::Occupied(o))
                         } else {
                             None
                         }
                     } else {
-                        None // TODO: on pickup or something
+                        None // no "on pickup" exists; emulated with health 0
                     }
                 },
                 Entry::Vacant(v) => Some(Entry::Vacant(v))
@@ -503,8 +650,8 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                 // TODO: perhaps this should be applied to attacks too?
                 if consume_energy_if_available(&mut energy, move_cost) {
                     *entry.or_insert(entity) = entity;
-                    positions.remove(current_pos);
-                    *current_pos = *target_pos;
+                    positions.remove(&current_pos.0.pop_back().unwrap());
+                    current_pos.0.push_front(*target_pos);
                 }
             }
         }
@@ -518,26 +665,37 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
     }
 
     // Process transient entities
-    for (entity, tick) in state.world.query_mut::<&DespawnOnTick>() {
+    for (entity, tick) in state.world.query::<&DespawnOnTick>().iter() {
         if state.ticks == tick.0 {
-            buffer.despawn(entity);
+            kill(&mut buffer, &mut despawn_buffer, &state, entity, None, None);
         }
     }
 
-    for (entity, DespawnRandomly(inv_rate)) in state.world.query_mut::<&DespawnRandomly>() {
+    for (entity, DespawnRandomly(inv_rate)) in state.world.query::<&DespawnRandomly>().iter() {
         if fastrand::u64(0..*inv_rate) == 0 {
-            buffer.despawn(entity);
+            kill(&mut buffer, &mut despawn_buffer, &state, entity, None, None);
         }
     }
 
     buffer.run_on(&mut state.world);
 
+    let mut delete = vec![];
+    for (position, entity) in positions.iter() {
+        if despawn_buffer.contains(entity) {
+            delete.push(*position);
+        }
+    }
+    for position in delete {
+        positions.remove(&position);
+    }
+
     // Send views to clients
+    // TODO: terrain layer below others
     for (_id, client) in state.clients.iter() {
         client.frames_tx.send(Frame::PlayerCount(state.clients.len())).await?;
         let mut nearby = vec![];
         if let Ok(pos) = state.world.get::<&Position>(client.entity) {
-            let pos = pos.0;
+            let pos = pos.head();
             for q in -VIEW..=VIEW {
                 for r in (-VIEW).max(-q - VIEW)..= VIEW.min(-q+VIEW) {
                     let offset = CoordVec::new(q, r);
@@ -548,9 +706,12 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                         if let Some(entity) = positions.get(&pos) {
                             let render = state.world.get::<&Render>(*entity)?;
                             let health = if let Ok(h) = state.world.get::<&Health>(*entity) {
-                                h.0 / h.1
+                                h.pct()
                             } else { 1.0 };
-                            nearby.push((q, r, render.0, health))
+                            nearby.push((q, r, render.0, health));
+                        } else if let Some(entity) = terrain_positions.get(&pos) {
+                            let render = state.world.get::<&Render>(*entity)?;
+                            nearby.push((q, r, render.0, 1.0));
                         } else {
                             let mut rng = rng_from_hash(pos);
                             let bg = if rng.usize(0..10) == 0 { ',' } else { '.' };
@@ -560,7 +721,9 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                 }
             }
             let health = state.world.get::<&Health>(client.entity)?.0;
-            client.frames_tx.send(Frame::Display { nearby, health }).await?;
+            let inventory = state.world.get::<&Inventory>(client.entity)?.0
+                .iter().map(|(i, q)| (i.name().to_string(), i.description().to_string(), *q)).filter(|(_, _, q)| *q > 0).collect();
+            client.frames_tx.send(Frame::Display { nearby, health, inventory }).await?;
         } else {
             client.frames_tx.send(Frame::Dead).await?;
         }
@@ -599,7 +762,7 @@ fn add_new_player(state: &mut GameState) -> Result<Entity> {
         }
     };
     Ok(state.world.spawn((
-        Position(pos),
+        Position::single_tile(pos),
         PlayerCharacter,
         Render(random_identifier()),
         Collidable,
@@ -610,7 +773,9 @@ fn add_new_player(state: &mut GameState) -> Result<Entity> {
             spawn_range: 3..=10,
             spawn_rate_inv: 20,
             aggression_range: 5
-        }
+        },
+        Energy { current: 0.0, regeneration_rate: 1.0, burst: 5.0 },
+        Inventory::empty()
     )))
 }
 

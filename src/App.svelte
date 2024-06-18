@@ -78,6 +78,11 @@
         {#if health}
             Your health is {health}.
         {/if}
+        <ul>
+            {#each inventory as item}
+                <li>{item[0]} x{item[2]}: {item[1]}</li>
+            {/each}
+        </ul>
     </div>
 </div>
 
@@ -89,6 +94,7 @@
     let dead = false
     let health
     let players
+    let inventory = []
 
     let ws
     const connect = () => {
@@ -105,6 +111,7 @@
                 }
                 grid = newGrid
                 health = data.Display.health
+                inventory = data.Display.inventory
             }
             if (data === "Dead") {
                 dead = true
@@ -164,7 +171,8 @@
         "a": "Left",
         "d": "Right",
         "z": "DownLeft",
-        "x": "DownRight"
+        "x": "DownRight",
+        "f": "Dig"
     }
 
     connect()
