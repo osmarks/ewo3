@@ -1,8 +1,6 @@
 use hecs::{CommandBuffer, Entity, World};
-use euclid::{Point3D, Point2D, Vector2D};
 use futures_util::{stream::TryStreamExt, SinkExt, StreamExt};
 use indexmap::IndexMap;
-use noise_functions::Sample3;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio::sync::{mpsc, Mutex};
@@ -11,29 +9,10 @@ use std::{collections::{hash_map::Entry, HashMap, HashSet, VecDeque}, convert::T
 use slab::Slab;
 use serde::{Serialize, Deserialize};
 
-struct AxialWorldSpace;
-struct CubicWorldSpace;
-type Coord = Point2D<i64, AxialWorldSpace>;
-type CubicCoord = Point3D<i64, CubicWorldSpace>;
-type CoordVec = Vector2D<i64, AxialWorldSpace>;
+pub mod worldgen;
+pub mod map;
 
-fn to_cubic(p0: Coord) -> CubicCoord {
-    CubicCoord::new(p0.x, p0.y, -p0.x - p0.y)
-}
-
-fn hex_distance(p0: Coord, p1: Coord) -> i64 {
-    let ax_dist = p0 - p1;
-    (ax_dist.x.abs() + ax_dist.y.abs() + (ax_dist.x + ax_dist.y).abs()) / 2
-}
-
-fn on_axis(p: CoordVec) -> bool {
-    let p = to_cubic(Coord::origin() + p);
-    let mut zero_ax = 0;
-    if p.x == 0 { zero_ax += 1 }
-    if p.y == 0 { zero_ax += 1 }
-    if p.z == 0 { zero_ax += 1 }
-    zero_ax >= 1
-}
+use map::*;
 
 async fn handle_connection(raw_stream: TcpStream, addr: SocketAddr, mut frames_rx: mpsc::Receiver<Frame>, inputs_tx: mpsc::Sender<Input>) -> Result<()> {
     let ws_stream = tokio_tungstenite::accept_async(raw_stream).await.context("websocket handshake failure")?;
@@ -105,7 +84,8 @@ struct Client {
 struct GameState {
     world: World,
     clients: Slab<Client>,
-    ticks: u64
+    ticks: u64,
+    map: worldgen::GeneratedWorld
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -255,57 +235,7 @@ impl Inventory {
 }
 
 const VIEW: i64 = 15;
-const WALL: i64 = 128;
 const RANDOM_DESPAWN_INV_RATE: u64 = 4000;
-const DIRECTIONS: &[CoordVec] = &[CoordVec::new(0, -1), CoordVec::new(1, -1), CoordVec::new(-1, 0), CoordVec::new(1, 0), CoordVec::new(0, 1), CoordVec::new(-1, 1)];
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum BaseTerrain {
-    Empty,
-    Occupied,
-    VeryOccupied
-}
-
-impl BaseTerrain {
-    fn can_enter(&self) -> bool {
-        *self == BaseTerrain::Empty
-    }
-
-    fn symbol(&self) -> Option<char> {
-        match *self {
-            Self::Empty => None,
-            Self::Occupied => Some('#'),
-            Self::VeryOccupied => Some('█')
-        }
-    }
-}
-
-const NOISE_SCALE: f32 = 0.05;
-
-fn get_base_terrain(pos: Coord) -> BaseTerrain {
-    let distance = hex_distance(pos, Coord::origin());
-    if distance >= (WALL + 12) {
-        return BaseTerrain::VeryOccupied
-    }
-    if distance >= WALL {
-        return BaseTerrain::Occupied
-    }
-    let pos = to_cubic(pos);
-    let noise = noise_functions::CellDistance.ridged(2, 1.00, 0.20).seed(406).sample3([pos.x as f32 * NOISE_SCALE, pos.y as f32 * NOISE_SCALE, pos.z as f32 * NOISE_SCALE]);
-    if noise >= 0.3 {
-        return BaseTerrain::VeryOccupied
-    }
-    if noise >= 0.2 {
-        return BaseTerrain::Occupied
-    }
-    return BaseTerrain::Empty
-}
-
-fn sample_range(range: i64) -> CoordVec {
-    let q = fastrand::i64(-range..=range);
-    let r = fastrand::i64((-range).max(-q-range)..=range.min(-q+range));
-    CoordVec::new(q, r)
-}
 
 struct EnemySpec {
     symbol: char,
@@ -333,10 +263,6 @@ impl EnemySpec {
             _ => unreachable!()
         }
     }
-}
-
-fn count_hexes(x: i64) -> i64 {
-    x*(x+1)*3+1
 }
 
 fn rng_from_hash<H: Hash>(x: H) -> fastrand::Rng {
@@ -425,7 +351,7 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                 }
                 newpos = pos + sample_range(*spawn_range.end());
             }
-            if !occupied && get_base_terrain(newpos).can_enter() && hex_distance(newpos, pos) >= *spawn_range.start() {
+            if !occupied && state.map.get_terrain(newpos).entry_cost().is_some() && hex_distance(newpos, pos) >= *spawn_range.start() {
                 let mut spec = EnemySpec::random();
                 spec.drops.push((Item::Bone, StochasticNumber::Triangle { min: 0.7 * spec.initial_health / 40.0, max: 1.3 * spec.initial_health / 40.0, mode: spec.initial_health / 40.0 }));
                 if spec.ranged {
@@ -558,7 +484,7 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
         }
         
         let target = position + next_movement;
-        if get_base_terrain(target).can_enter() && target != position {
+        if state.map.get_terrain(target).entry_cost().is_some() && target != position {
             buffer.insert_one(client.entity, MovingInto(target));
         }
     }
@@ -568,6 +494,7 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
     let mut despawn_buffer = HashSet::new();
 
     // This might lead to a duping glitch, which would at least be funny.
+    // TODO: Players should drop items on disconnect.
     let kill = |buffer: &mut CommandBuffer, despawn_buffer: &mut HashSet<Entity>, state: &GameState, entity: Entity, killer: Option<Entity>, position: Option<Coord>| {
         let position = position.unwrap_or_else(|| state.world.get::<&Position>(entity).unwrap().head());
         despawn_buffer.insert(entity);
@@ -618,7 +545,8 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
             }
         }
 
-        if get_base_terrain(*target_pos).can_enter() {
+        if let Some(entry_cost) = state.map.get_terrain(*target_pos).entry_cost() {
+            move_cost += entry_cost as f32;
             let entry = match positions.entry(*target_pos) {
                 Entry::Occupied(o) => {
                     let target_entity = *o.get();
@@ -696,28 +624,24 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
         let mut nearby = vec![];
         if let Ok(pos) = state.world.get::<&Position>(client.entity) {
             let pos = pos.head();
-            for q in -VIEW..=VIEW {
-                for r in (-VIEW).max(-q - VIEW)..= VIEW.min(-q+VIEW) {
-                    let offset = CoordVec::new(q, r);
-                    let pos = pos + offset;
-                    if let Some(symbol) = get_base_terrain(pos).symbol() {
-                        nearby.push((q, r, symbol, 1.0));
-                    } else {
-                        if let Some(entity) = positions.get(&pos) {
-                            let render = state.world.get::<&Render>(*entity)?;
-                            let health = if let Ok(h) = state.world.get::<&Health>(*entity) {
-                                h.pct()
-                            } else { 1.0 };
-                            nearby.push((q, r, render.0, health));
-                        } else if let Some(entity) = terrain_positions.get(&pos) {
-                            let render = state.world.get::<&Render>(*entity)?;
-                            nearby.push((q, r, render.0, 1.0));
-                        } else {
-                            let mut rng = rng_from_hash(pos);
-                            let bg = if rng.usize(0..10) == 0 { ',' } else { '.' };
-                            nearby.push((q, r, bg, rng.f32() * 0.1 + 0.9))
-                        }
-                    }
+            for offset in hex_circle(VIEW) {
+                let pos = pos + offset;
+                let mut rng = rng_from_hash(pos);
+
+                if let Some(entity) = positions.get(&pos) {
+                    let render = state.world.get::<&Render>(*entity)?;
+                    let health = if let Ok(h) = state.world.get::<&Health>(*entity) {
+                        h.pct()
+                    } else { 1.0 };
+                    nearby.push((offset.x, offset.y, render.0, health));
+                } else if let Some(entity) = terrain_positions.get(&pos) {
+                    let render = state.world.get::<&Render>(*entity)?;
+                    nearby.push((offset.x, offset.y, render.0, 1.0));
+                } else if let Some(terrain) = state.map.get_terrain(pos).symbol() {
+                    nearby.push((offset.x, offset.y, terrain, rng.f32() * 0.1 + 0.9));
+                } else {
+                    let bg = if rng.usize(0..10) == 0 { ',' } else { '.' };
+                    nearby.push((offset.x, offset.y, bg, rng.f32() * 0.1 + 0.9))
                 }
             }
             let health = state.world.get::<&Health>(client.entity)?.0;
@@ -756,8 +680,8 @@ fn random_identifier() -> char {
 
 fn add_new_player(state: &mut GameState) -> Result<Entity> {
     let pos = loop {
-        let pos = Coord::origin() + sample_range(WALL - 10);
-        if get_base_terrain(pos).can_enter() {
+        let pos = Coord::origin() + sample_range(state.map.radius() - 10);
+        if state.map.get_terrain(pos).entry_cost().is_some() {
             break pos;
         }
     };
@@ -786,7 +710,8 @@ async fn main() -> Result<()> {
     let state = Arc::new(Mutex::new(GameState {
         world: World::new(),
         clients: Slab::new(),
-        ticks: 0
+        ticks: 0,
+        map: worldgen::generate_world()
     }));
 
     let try_socket = TcpListener::bind(&addr).await;

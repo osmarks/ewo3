@@ -3,8 +3,6 @@ name = "ewo3"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 hecs = { version = "0.10", features = ["column-serialize"] }
 euclid = { version = "0.22", features = ["serde"] }
@@ -21,3 +19,9 @@ lazy_static = "1"
 seahash = "4"
 noise-functions = "0.2"
 indexmap = "2"
+image = { version = "0.25", default-features = false, features = ["png"] }
+rayon = "1"
+
+[[bin]]
+name = "worldgen"
+path = "src/worldgen_test.rs"
