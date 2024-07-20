@@ -183,6 +183,9 @@ struct Energy { current: f32, regeneration_rate: f32, burst: f32 }
 #[derive(Debug, Clone)]
 struct Drops(Vec<(Item, StochasticNumber)>);
 
+#[derive(Debug, Clone)]
+struct Jump(i64);
+
 impl Energy {
     fn try_consume(&mut self, cost: f32) -> bool {
         if self.current >= -1e-12 { // numerics
@@ -245,6 +248,7 @@ struct EnemySpec {
     move_delay: usize,
     attack_cooldown: u64,
     ranged: bool,
+    movement: i64,
     drops: Vec<(Item, StochasticNumber)>
 }
 
@@ -252,14 +256,14 @@ impl EnemySpec {
     // Numbers ported from original EWO. Fudge constants added elsewhere. 
     fn random() -> EnemySpec {
         match fastrand::usize(0..650) {
-            0..=99 => EnemySpec { symbol: 'I', min_damage: 10.0, damage_range: 5.0, initial_health: 50.0, move_delay: 70, attack_cooldown: 10, ranged: false, drops: vec![] }, // IBIS
-            100..=199 => EnemySpec { symbol: 'K', min_damage: 5.0, damage_range: 15.0, initial_health: 30.0, move_delay: 40, attack_cooldown: 10, ranged: false, drops: vec![] }, // KESTREL
-            200..=299 => EnemySpec { symbol: 'S', min_damage: 5.0, damage_range: 5.0, initial_health: 20.0, move_delay: 50, attack_cooldown: 10, ranged: false, drops: vec![] }, // SNAKE
-            300..=399 => EnemySpec { symbol: 'E', min_damage: 10.0, damage_range: 20.0, initial_health: 80.0, move_delay: 80, attack_cooldown: 10, ranged: false, drops: vec![] }, // EMU
-            400..=499 => EnemySpec { symbol: 'O', min_damage: 8.0, damage_range: 17.0, initial_health: 150.0, move_delay: 100, attack_cooldown: 10, ranged: false, drops: vec![] }, // OGRE
-            500..=599 => EnemySpec { symbol: 'R', min_damage: 5.0, damage_range: 5.0, initial_health: 15.0, move_delay: 40, attack_cooldown: 10, ranged: false, drops: vec![] }, // RAT
-            600..=609 => EnemySpec { symbol: 'M' , min_damage: 20.0, damage_range: 10.0, initial_health: 150.0, move_delay: 70, attack_cooldown: 10, ranged: false, drops: vec![] }, // MOA
-            610..=649 => EnemySpec { symbol: 'P', min_damage: 10.0, damage_range: 5.0, initial_health: 15.0, move_delay: 20, attack_cooldown: 10, ranged: true, drops: vec![] }, // PLATYPUS
+            0..=99 => EnemySpec { symbol: 'I', min_damage: 10.0, damage_range: 5.0, initial_health: 50.0, move_delay: 70, attack_cooldown: 10, ranged: false, drops: vec![], movement: 1 }, // IBIS
+            100..=199 => EnemySpec { symbol: 'K', min_damage: 5.0, damage_range: 25.0, initial_health: 60.0, move_delay: 30, attack_cooldown: 12, ranged: false, drops: vec![], movement: 2 }, // KANGAROO
+            200..=299 => EnemySpec { symbol: 'S', min_damage: 5.0, damage_range: 5.0, initial_health: 20.0, move_delay: 50, attack_cooldown: 10, ranged: false, drops: vec![], movement: 1 }, // SNAKE
+            300..=399 => EnemySpec { symbol: 'E', min_damage: 10.0, damage_range: 20.0, initial_health: 80.0, move_delay: 80, attack_cooldown: 10, ranged: false, drops: vec![], movement: 1 }, // EMU
+            400..=499 => EnemySpec { symbol: 'O', min_damage: 8.0, damage_range: 17.0, initial_health: 150.0, move_delay: 100, attack_cooldown: 10, ranged: false, drops: vec![], movement: 1 }, // OGRE
+            500..=599 => EnemySpec { symbol: 'R', min_damage: 5.0, damage_range: 5.0, initial_health: 15.0, move_delay: 40, attack_cooldown: 10, ranged: false, drops: vec![], movement: 1 }, // RAT
+            600..=609 => EnemySpec { symbol: 'M' , min_damage: 20.0, damage_range: 10.0, initial_health: 150.0, move_delay: 70, attack_cooldown: 10, ranged: false, drops: vec![], movement: 1 }, // MOA
+            610..=649 => EnemySpec { symbol: 'P', min_damage: 10.0, damage_range: 5.0, initial_health: 15.0, move_delay: 20, attack_cooldown: 10, ranged: true, drops: vec![], movement: 1 }, // PLATYPUS
             _ => unreachable!()
         }
     }
@@ -365,7 +369,8 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                         Collidable,
                         DespawnRandomly(RANDOM_DESPAWN_INV_RATE),
                         Energy { regeneration_rate: 1.0, current: 0.0, burst: 0.0 },
-                        Drops(spec.drops)
+                        Drops(spec.drops),
+                        Jump(spec.movement)
                     ));
                 } else {
                     buffer.spawn((
@@ -378,7 +383,8 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                         Collidable,
                         DespawnRandomly(RANDOM_DESPAWN_INV_RATE),
                         Energy { regeneration_rate: 1.0, current: 0.0, burst: 0.0 },
-                        Drops(spec.drops)
+                        Drops(spec.drops),
+                        Jump(spec.movement)
                     ));
                 }
             }
@@ -386,7 +392,7 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
     }
 
     // Process enemy motion and ranged attacks
-    for (entity, (pos, ranged, energy)) in state.world.query::<hecs::With<(&Position, Option<&mut RangedAttack>, Option<&mut Energy>), &Enemy>>().iter() {
+    for (entity, (pos, ranged, energy, jump)) in state.world.query::<hecs::With<(&Position, Option<&mut RangedAttack>, Option<&mut Energy>, Option<&Jump>), &Enemy>>().iter() {
         let pos = pos.head();
 
         for direction in DIRECTIONS.iter() {
@@ -433,8 +439,18 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                     ));
                 }
             } else {
-                let direction = DIRECTIONS.iter().min_by_key(|dir| hex_distance(pos + **dir, target_pos)).unwrap();
-                buffer.insert_one(entity, MovingInto(pos + *direction));
+                let direction = *DIRECTIONS.iter().min_by_key(|dir| hex_distance(pos + **dir, target_pos)).unwrap();
+                let max_movement_distance = jump.map(|j| j.0).unwrap_or(1);
+                let mut best_scale = 1;
+                let mut best_distance = hex_distance(pos + direction, target_pos);
+                for i in 1..=max_movement_distance {
+                    let new_distance = hex_distance(pos + direction * i, target_pos);
+                    if new_distance < best_distance {
+                        best_distance = new_distance;
+                        best_scale = i;
+                    }
+                }
+                buffer.insert_one(entity, MovingInto(pos + direction * best_scale));
             }
         } else {
             // wander randomly (ethical)
@@ -528,6 +544,8 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
     // Process motion and attacks
     for (entity, (current_pos, MovingInto(target_pos), damage, mut energy, move_cost, despawn_on_impact)) in state.world.query::<(&mut Position, &MovingInto, Option<&mut Attack>, Option<&mut Energy>, Option<&MoveCost>, Option<&DespawnOnImpact>)>().iter() {
         let mut move_cost = move_cost.map(|x| x.0.sample()).unwrap_or(0.0);
+
+        move_cost *= (hex_distance(*target_pos, current_pos.head()) as f32).powf(0.5);
         
         for tile in current_pos.0.iter() {
             // TODO: perhaps large enemies should not be exponentially more vulnerable to environmental hazards
@@ -703,15 +721,30 @@ fn add_new_player(state: &mut GameState) -> Result<Entity> {
     )))
 }
 
+async fn load_world() -> Result<worldgen::GeneratedWorld> {
+    let data = tokio::fs::read("world.bin").await?;
+    Ok(bincode::serde::decode_from_slice(&data, bincode::config::standard())?.0)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let addr = std::env::args().nth(1).unwrap_or_else(|| "0.0.0.0:8080".to_string());
+
+    let world = match load_world().await {
+        Ok(world) => world,
+        Err(e) => {
+            println!("Failed to load world, generating new one: {:?}", e);
+            let world = worldgen::generate_world();
+            tokio::fs::write("world.bin", bincode::serde::encode_to_vec(&world, bincode::config::standard())?).await?;
+            world
+        }
+    };
 
     let state = Arc::new(Mutex::new(GameState {
         world: World::new(),
         clients: Slab::new(),
         ticks: 0,
-        map: worldgen::generate_world()
+        map: world
     }));
 
     let try_socket = TcpListener::bind(&addr).await;

@@ -1,8 +1,7 @@
-use std::{cmp::Ordering, collections::{hash_map::Entry, BinaryHeap, HashMap, HashSet}, hash::{Hash, Hasher}, ops::{Index, IndexMut}};
+use std::{cmp::Ordering, collections::{hash_map::Entry, BinaryHeap, HashMap, HashSet, VecDeque}, hash::{Hash, Hasher}, ops::{Index, IndexMut}};
 
 use noise_functions::Sample3;
 use serde::{Deserialize, Serialize};
-
 use crate::map::*;
 
 pub const WORLD_RADIUS: i64 = 1024;
@@ -300,13 +299,56 @@ pub fn compute_humidity(distances: Map<f32>, heightmap: &Map<f32>) -> Map<f32> {
 }
 
 const SEA_LEVEL: f32 = -0.8;
-const EROSION: f32 = 0.05;
+const EROSION: f32 = 0.09;
+const EROSION_EXPONENT: f32 = 1.5;
+
+fn floodfill(src: Coord, all: &HashSet<Coord>) -> HashSet<Coord> {
+    let mut out = HashSet::new();
+    let mut queue = VecDeque::new();
+    queue.push_back(src);
+    out.insert(src);
+    while let Some(coord) = queue.pop_front() {
+        for offset in DIRECTIONS {
+            let neighbor = coord + *offset;
+            if all.contains(&neighbor) && !out.contains(&neighbor) {
+                queue.push_back(neighbor);
+                out.insert(neighbor);
+            }
+        }
+    }
+    out
+}
 
 pub fn simulate_water(heightmap: &mut Map<f32>) -> Map<f32> {
     let mut watermap = Map::<f32>::new(heightmap.radius, 0.0);
 
     let sources = generate_separated_high_points(WATER_SOURCES, WORLD_RADIUS / 10, &heightmap);
     let sinks = heightmap.iter_coords().filter(|(c, _)| heightmap[*c] <= SEA_LEVEL).map(|(c, _)| c).collect::<HashSet<_>>();
+    let mut remainder = sinks.clone();
+    let sea = floodfill(Coord::new(0, WORLD_RADIUS), &sinks);
+
+    for s in sea.iter() {
+        remainder.remove(&s);
+    }
+
+    let mut lakes = vec![];
+    loop {
+        let next = remainder.iter().next();
+        match next {
+            Some(s) => {
+                let lake = floodfill(*s, &remainder);
+                for l in lake.iter() {
+                    remainder.remove(l);
+                }
+                lakes.push(lake);
+            },
+            None => break
+        }
+    }
+
+    for sink in sinks.iter() {
+        watermap[*sink] = 10.0;
+    }
 
     for source in sources.iter() {
         let heightmap_ = &*heightmap;
@@ -316,7 +358,7 @@ pub fn simulate_water(heightmap: &mut Map<f32>) -> Map<f32> {
                 let neighbor = c + *offset;
                 if heightmap_.in_range(neighbor) {
                     let factor = if watermap_[neighbor] > 0.0 { 0.1 } else { 1.0 };
-                    Some((neighbor, factor * (heightmap_[neighbor] - heightmap_[c] + 0.00).max(0.0)))
+                    Some((neighbor, factor * (heightmap_[neighbor] - heightmap_[c] + 0.0001).max(0.0)))
                 } else {
                     None
                 }
@@ -325,7 +367,13 @@ pub fn simulate_water(heightmap: &mut Map<f32>) -> Map<f32> {
         let heuristic = |c: Coord| {
             (heightmap[c] * 0.00).max(0.0)
         };
-        let path = astar(*source, |c| sinks.contains(&c), heuristic, get_neighbours);
+        let mut path = astar(*source, |c| sinks.contains(&c), heuristic, get_neighbours);
+
+        let end = path.last().unwrap();
+        if !sea.contains(end) {
+            // route lake to sea
+            path.extend(astar(*end, |c| sea.contains(&c), heuristic, get_neighbours));
+        }
 
         for point in path {
             let water_range_raw = watermap[point] * 1.0 - heightmap[point];
@@ -338,22 +386,18 @@ pub fn simulate_water(heightmap: &mut Map<f32>) -> Map<f32> {
                 watermap[point + nearby] = watermap[point + nearby].min(3.0);
             }
 
-            let erosion_range_raw = water_range_raw * 2.0 + 2.0;
+            let erosion_range_raw = (water_range_raw * 2.0 + 2.0).powf(EROSION_EXPONENT);
             let erosion_range = erosion_range_raw.ceil() as i64;
             for (this_range, nearby) in hex_range(erosion_range) {
                 if !watermap.in_range(point + nearby) {
                     continue;
                 }
                 if this_range > 0 {
-                    heightmap[point + nearby] -= EROSION * watermap[point] / (this_range as f32) / erosion_range_raw.max(1.0);
+                    heightmap[point + nearby] -= EROSION * watermap[point] / (this_range as f32) / erosion_range_raw.max(1.0).powf(EROSION_EXPONENT);
                     heightmap[point + nearby] = heightmap[point + nearby].max(SEA_LEVEL);
                 }
             }
         }
-    }
-
-    for sink in sinks {
-        watermap[sink] = 10.0;
     }
 
     watermap

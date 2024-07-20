@@ -36,10 +36,11 @@ fn main() -> Result<()> {
     for (position, value) in heightmap.iter() {
         let col = position.x + (position.y - (position.y & 1)) / 2 + WORLD_RADIUS;
         let row = position.y + WORLD_RADIUS;
-        //let contour = contour_points.get(&position).copied().unwrap_or_default();
-        let contour = (255.0 * humidity[position]) as u8;
+        let height = ((*value + 1.0) * 127.5) as u8;
+        let contour = contour_points.get(&position).copied().unwrap_or_default();
+        //let contour = (255.0 * humidity[position]) as u8;
         let water = water[position];
-        image.put_pixel(col as u32, row as u32, Rgb::from([contour, 0, (water.min(1.0) * 255.0) as u8]));
+        image.put_pixel(col as u32, row as u32, Rgb::from([contour, height, (water.min(1.0) * 255.0) as u8]));
     }
 
     image.save("./out.png")?;

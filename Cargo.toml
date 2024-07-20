@@ -21,6 +21,7 @@ noise-functions = "0.2"
 indexmap = "2"
 image = { version = "0.25", default-features = false, features = ["png"] }
 rayon = "1"
+bincode = { version = "2.0.0-rc.3", features = ["serde"] }
 
 [[bin]]
 name = "worldgen"

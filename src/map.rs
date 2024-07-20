@@ -10,9 +10,13 @@ pub fn to_cubic(p0: Coord) -> CubicCoord {
     CubicCoord::new(p0.x, p0.y, -p0.x - p0.y)
 }
 
+pub fn vec_length(ax_dist: CoordVec) -> i64 {
+    (ax_dist.x.abs() + ax_dist.y.abs() + (ax_dist.x + ax_dist.y).abs()) / 2
+}
+
 pub fn hex_distance(p0: Coord, p1: Coord) -> i64 {
     let ax_dist = p0 - p1;
-    (ax_dist.x.abs() + ax_dist.y.abs() + (ax_dist.x + ax_dist.y).abs()) / 2
+    vec_length(ax_dist)
 }
 
 pub fn on_axis(p: CoordVec) -> bool {
