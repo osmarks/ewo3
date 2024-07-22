@@ -26,3 +26,6 @@ bincode = { version = "2.0.0-rc.3", features = ["serde"] }
 [[bin]]
 name = "worldgen"
 path = "src/worldgen_test.rs"
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-Ctarget-cpu=native"]

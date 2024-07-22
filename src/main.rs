@@ -70,7 +70,7 @@ enum Input {
 #[derive(Serialize, Deserialize, Clone)]
 enum Frame {
     Dead,
-    Display { nearby: Vec<(i64, i64, char, f32)>, health: f32, inventory: Vec<(String, String, u64)> },
+    Display { nearby: Vec<(i32, i32, char, f32)>, health: f32, inventory: Vec<(String, String, u64)> },
     PlayerCount(usize),
     Message(String)
 }
@@ -157,7 +157,7 @@ struct DespawnOnTick(u64);
 struct DespawnRandomly(u64);
 
 #[derive(Debug, Clone)]
-struct EnemyTarget { spawn_range: std::ops::RangeInclusive<i64>, spawn_density: f32, spawn_rate_inv: usize, aggression_range: i64 }
+struct EnemyTarget { spawn_range: std::ops::RangeInclusive<i32>, spawn_density: f32, spawn_rate_inv: usize, aggression_range: i32 }
 
 #[derive(Debug, Clone)]
 struct Enemy;
@@ -184,7 +184,7 @@ struct Energy { current: f32, regeneration_rate: f32, burst: f32 }
 struct Drops(Vec<(Item, StochasticNumber)>);
 
 #[derive(Debug, Clone)]
-struct Jump(i64);
+struct Jump(i32);
 
 impl Energy {
     fn try_consume(&mut self, cost: f32) -> bool {
@@ -237,7 +237,7 @@ impl Inventory {
     }
 }
 
-const VIEW: i64 = 15;
+const VIEW: i32 = 15;
 const RANDOM_DESPAWN_INV_RATE: u64 = 4000;
 
 struct EnemySpec {
@@ -248,7 +248,7 @@ struct EnemySpec {
     move_delay: usize,
     attack_cooldown: u64,
     ranged: bool,
-    movement: i64,
+    movement: i32,
     drops: Vec<(Item, StochasticNumber)>
 }
 
@@ -423,7 +423,7 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
             if let Some(ranged_attack) = ranged {
                 // slightly smart behaviour for ranged attacker: try to stay just within range
                 let direction = DIRECTIONS.iter().min_by_key(|dir|
-                    (hex_distance(pos + **dir, target_pos) - (ranged_attack.range as i64 - 1)).abs()).unwrap();
+                    (hex_distance(pos + **dir, target_pos) - (ranged_attack.range as i32 - 1)).abs()).unwrap();
                 buffer.insert_one(entity, MovingInto(pos + *direction));
                 // do ranged attack if valid
                 let atk_dir = target_pos - pos;

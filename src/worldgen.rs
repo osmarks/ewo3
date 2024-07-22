@@ -4,8 +4,8 @@ use noise_functions::Sample3;
 use serde::{Deserialize, Serialize};
 use crate::map::*;
 
-pub const WORLD_RADIUS: i64 = 1024;
-const NOISE_SCALE: f32 = 0.001;
+pub const WORLD_RADIUS: i32 = 1024;
+const NOISE_SCALE: f32 = 0.0005;
 const HEIGHT_EXPONENT: f32 = 0.3;
 const WATER_SOURCES: usize = 40;
 
@@ -27,6 +27,18 @@ fn percentilize<F: Fn(f32) -> f32>(raw: &mut Map<f32>, postprocess: F) {
     }
 }
 
+fn normalize<F: Fn(f32) -> f32>(raw: &mut Map<f32>, postprocess: F) {
+    let mut min = raw.data.iter().copied().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap();
+    let mut max = raw.data.iter().copied().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap();
+    if min == max {
+        min = 0.0;
+        max = 1.0;
+    }
+    for x in raw.data.iter_mut() {
+        *x = postprocess((*x - min) / (max - min));
+    }
+}
+
 pub fn generate_heights() -> Map<f32> {
     let mut raw = Map::<f32>::from_fn(height_baseline, WORLD_RADIUS);
     percentilize(&mut raw, |x| {
@@ -37,10 +49,10 @@ pub fn generate_heights() -> Map<f32> {
 }
 
 struct CoordsIndexIterator {
-    radius: i64,
+    radius: i32,
     index: usize,
-    r: i64,
-    q: i64,
+    r: i32,
+    q: i32,
     max: usize
 }
 
@@ -68,11 +80,11 @@ impl Iterator for CoordsIndexIterator {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Map<T> {
     pub data: Vec<T>,
-    pub radius: i64
+    pub radius: i32
 }
 
 impl<T> Map<T> {
-    pub fn new(radius: i64, fill: T) -> Map<T> where T: Clone {
+    pub fn new(radius: i32, fill: T) -> Map<T> where T: Clone {
         let size = count_hexes(radius) as usize;
         Map {
             data: vec![fill; size],
@@ -80,7 +92,7 @@ impl<T> Map<T> {
         }
     }
 
-    pub fn from_fn<S, F: FnMut(Coord) -> S>(mut f: F, radius: i64) -> Map<S> {
+    pub fn from_fn<S, F: FnMut(Coord) -> S>(mut f: F, radius: i32) -> Map<S> {
         let size = count_hexes(radius) as usize;
         Map {
             radius,
@@ -203,7 +215,7 @@ impl<T: Hash + Eq + PartialEq> PartialOrd for PointWrapper<T> {
     }
 }
 
-pub fn generate_separated_high_points(n: usize, sep: i64, map: &Map<f32>) -> Vec<Coord> {
+pub fn generate_separated_high_points(n: usize, sep: i32, map: &Map<f32>) -> Vec<Coord> {
     let mut points = vec![];
     let mut priority = BinaryHeap::with_capacity(map.data.len());
     for (coord, height) in map.iter() {
@@ -263,39 +275,40 @@ fn astar<C: PartialEq + Eq + Hash + Copy + std::fmt::Debug, F: FnMut(C) -> f32, 
     path
 }
 
-pub fn distance_map<I: Iterator<Item=Coord>>(radius: i64, sources: I) -> Map<f32> {
+pub fn distance_map<I: Iterator<Item=Coord>>(radius: i32, sources: I) -> Map<f32> {
     let radius_f = radius as f32;
     let mut distances = Map::<f32>::new(radius, radius_f);
-    let mut queue = BinaryHeap::new();
+    let mut queue = VecDeque::new();
     for source in sources {
-        queue.push(PointWrapper(0.0, source));
+        queue.push_back((0.0, source));
     }
-    while let Some(PointWrapper(dist, coord)) = queue.pop() {
+    while let Some((dist, coord)) = queue.pop_front() {
         if distances[coord] < radius_f {
             continue;
         }
-        if dist < radius_f {
-            distances[coord] = dist;
-        }
+        distances[coord] = dist;
         for offset in DIRECTIONS {
             let neighbor = coord + *offset;
             let new_distance = dist + 1.0;
             if distances.in_range(neighbor) && new_distance < distances[neighbor] {
-                queue.push(PointWrapper(new_distance, neighbor));
+                queue.push_back((new_distance, neighbor));
             }
         }
     }
     distances
 }
 
-pub fn compute_humidity(distances: Map<f32>, heightmap: &Map<f32>) -> Map<f32> {
-    let mut humidity = distances;
-    percentilize(&mut humidity, |x| (1.0 - x).powf(0.3));
+pub fn compute_groundwater(water: &Map<f32>, rain: &Map<f32>, heightmap: &Map<f32>) -> Map<f32> {
+    let mut groundwater = distance_map(
+        water.radius, 
+        water.iter().filter_map(|(c, i)| if *i > 0.0 { Some(c) } else { None }));;
+    percentilize(&mut groundwater, |x| (1.0 - x).powf(0.3));
     for (coord, h) in heightmap.iter() {
-        humidity[coord] -= *h * 0.6;
+        groundwater[coord] -= *h * 0.05;
+        groundwater[coord] += rain[coord] * 0.15;
     }
-    percentilize(&mut humidity, |x| x.powf(1.0));
-    humidity
+    percentilize(&mut groundwater, |x| x.powf(0.7));
+    groundwater
 }
 
 const SEA_LEVEL: f32 = -0.8;
@@ -319,13 +332,17 @@ fn floodfill(src: Coord, all: &HashSet<Coord>) -> HashSet<Coord> {
     out
 }
 
-pub fn simulate_water(heightmap: &mut Map<f32>) -> Map<f32> {
+pub fn get_sea(heightmap: &Map<f32>) -> (HashSet<Coord>, HashSet<Coord>) {
+    let sinks = heightmap.iter_coords().filter(|(c, _)| heightmap[*c] <= SEA_LEVEL).map(|(c, _)| c).collect::<HashSet<_>>();
+    let sea = floodfill(Coord::new(0, WORLD_RADIUS), &sinks);
+    (sinks, sea)
+}
+
+pub fn simulate_water(heightmap: &mut Map<f32>, rain_map: &Map<f32>, sea: &HashSet<Coord>, sinks: &HashSet<Coord>) -> Map<f32> { 
     let mut watermap = Map::<f32>::new(heightmap.radius, 0.0);
 
-    let sources = generate_separated_high_points(WATER_SOURCES, WORLD_RADIUS / 10, &heightmap);
-    let sinks = heightmap.iter_coords().filter(|(c, _)| heightmap[*c] <= SEA_LEVEL).map(|(c, _)| c).collect::<HashSet<_>>();
+    let sources = generate_separated_high_points(WATER_SOURCES, WORLD_RADIUS / 10, &rain_map);
     let mut remainder = sinks.clone();
-    let sea = floodfill(Coord::new(0, WORLD_RADIUS), &sinks);
 
     for s in sea.iter() {
         remainder.remove(&s);
@@ -377,7 +394,7 @@ pub fn simulate_water(heightmap: &mut Map<f32>) -> Map<f32> {
 
         for point in path {
             let water_range_raw = watermap[point] * 1.0 - heightmap[point];
-            let water_range = water_range_raw.ceil() as i64;
+            let water_range = water_range_raw.ceil() as i32;
             for (_, nearby) in hex_range(water_range) {
                 if !watermap.in_range(point + nearby) {
                     continue;
@@ -387,7 +404,7 @@ pub fn simulate_water(heightmap: &mut Map<f32>) -> Map<f32> {
             }
 
             let erosion_range_raw = (water_range_raw * 2.0 + 2.0).powf(EROSION_EXPONENT);
-            let erosion_range = erosion_range_raw.ceil() as i64;
+            let erosion_range = erosion_range_raw.ceil() as i32;
             for (this_range, nearby) in hex_range(erosion_range) {
                 if !watermap.in_range(point + nearby) {
                     continue;
@@ -401,6 +418,116 @@ pub fn simulate_water(heightmap: &mut Map<f32>) -> Map<f32> {
     }
 
     watermap
+}
+
+struct WindSlice {
+    coord: Coord,
+    humidity: f32, // hPa
+    temperature: f32, // relative, offset from base temperature
+    last_height: f32
+}
+
+// https://en.wikipedia.org/wiki/Clausius%E2%80%93Clapeyron_relation#Meteorology_and_climatology
+// temperature in degrees Celsius for some reason, pressure in hPa
+// returns approx. saturation vapour pressure of water
+fn august_roche_magnus(temperature: f32) -> f32 {
+    6.1094 * f32::exp((17.625 * temperature) / (243.04 + temperature))
+}
+
+// 2D hex convolution
+fn smooth(map: &Map<f32>, radius: i32) -> Map<f32> {
+    let mut out = Map::<f32>::new(map.radius, 0.0);
+    for (coord, index) in map.iter_coords() {
+        let mut sum = map.data[index];
+        for (_, offset) in hex_range(radius) {
+            let neighbor = coord + offset;
+            if map.in_range(neighbor) {
+                sum += map[neighbor];
+            }
+        }
+        out.data[index] = sum / (count_hexes(radius) as f32);
+    }
+    out
+}
+
+const BASE_TEMPERATURE: f32 = 30.0; // degrees
+const HEIGHT_SCALE: f32 = 1e3; // unrealistic but makes world more interesting; m
+const SEA_LEVEL_AIR_PRESSURE: f32 = 1013.0; // hPa
+const PRESSURE_DROP_PER_METER: f32 = 0.001; // hPa m^-1
+const AIR_SPECIFIC_HEAT_CAPACITY: f32 = 1012.0; // J kg^-1 K^-1
+const EARTH_GRAVITY: f32 = 9.81; // m s^-2
+
+pub fn simulate_air(heightmap: &Map<f32>, sea: &HashSet<Coord>, scan_dir: CoordVec, perpendicular_dir: CoordVec) -> (Map<f32>, Map<f32>, Map<f32>) {   
+    let start_pos = Coord::origin() + -scan_dir * WORLD_RADIUS;
+    let mut rain_map = Map::<f32>::new(heightmap.radius, 0.0);
+    let mut temperature_map = Map::<f32>::new(heightmap.radius, 0.0);
+    let mut atmo_humidity = Map::<f32>::new(heightmap.radius, 0.0); // relative humidity
+    let mut frontier = (-WORLD_RADIUS..=WORLD_RADIUS).map(|x| WindSlice {
+        coord: start_pos + perpendicular_dir * x,
+        humidity: 0.0,
+        temperature: 0.0,
+        last_height: -1.0
+    }).collect::<Vec<_>>();
+    loop {
+        let mut any_in_range = false;
+        // Wind moves across the terrain in some direction.
+        // We treat it as a line advancing and gaining/losing water and temperature.
+        // Water is lost when the partial pressure of water in the air is greater than the saturation vapour pressure.
+        // Temperature changes with height based on a slightly dubious equation I derived.
+        for slice in frontier.iter_mut() {
+            if heightmap.in_range(slice.coord) {
+                any_in_range = true;
+                // okay approximation
+                //let air_pressure = SEA_LEVEL_AIR_PRESSURE - PRESSURE_DROP_PER_METER * heightmap[slice.coord] * HEIGHT_SCALE; // hPa
+                let max_water = august_roche_magnus(slice.temperature);
+
+                // sea: reset temperature, max humidity
+                if sea.contains(&slice.coord) {
+                    slice.temperature = BASE_TEMPERATURE;
+                    slice.humidity = max_water * 0.9;
+                    slice.last_height = SEA_LEVEL;
+                    
+                } else {
+                    let excess = (slice.humidity - max_water).max(0.0);
+                    slice.humidity -= excess;
+                    let delta_h = (heightmap[slice.coord] - slice.last_height) * HEIGHT_SCALE;
+                    // ΔGPE = mgh = hgρV = hgρHS
+                    // ΔHE = CρHSΔT
+                    // ΔT = hg / C
+                    slice.temperature -= EARTH_GRAVITY * delta_h / AIR_SPECIFIC_HEAT_CAPACITY;
+                    rain_map[slice.coord] = excess;
+                    slice.last_height = heightmap[slice.coord];
+                }
+
+                atmo_humidity[slice.coord] = slice.humidity / max_water;
+                temperature_map[slice.coord] = slice.temperature;
+            }
+
+            slice.coord += scan_dir;
+        }
+
+        let mut next_temperature = vec![0.0; frontier.len()];
+        let mut next_humidity = vec![0.0; frontier.len()];
+        // Smooth out temperature and humidity.
+        for i in 1..(frontier.len()-1) { 
+            next_temperature[i] = 1.0/3.0 * (frontier[i-1].temperature + frontier[i+1].temperature + frontier[i].temperature);
+            next_humidity[i] = 1.0/3.0 * (frontier[i-1].humidity + frontier[i+1].humidity + frontier[i].humidity);
+        }
+
+        for (i, slice) in frontier.iter_mut().enumerate() {
+            slice.temperature = next_temperature[i];
+            slice.humidity = next_humidity[i];
+        }
+        
+        if !any_in_range { break; }
+    }
+
+    normalize(&mut rain_map, |x| x.powf(0.5));
+    let rain_map = smooth(&rain_map, 3);
+
+    normalize(&mut temperature_map, |x| x);
+
+    (rain_map, temperature_map, atmo_humidity)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -423,7 +550,11 @@ pub fn generate_world() -> GeneratedWorld {
     let mut heightmap = generate_heights();
     let mut terrain = Map::<TerrainType>::new(heightmap.radius, TerrainType::Empty);
 
-    let water = simulate_water(&mut heightmap);
+    let (sinks, sea) = get_sea(&heightmap);
+
+    let (rain, temperature, atmo_humidity) = simulate_air(&heightmap, &sea, CoordVec::new(0, -1), CoordVec::new(1, 0));
+
+    let water = simulate_water(&mut heightmap, &rain, &sea, &sinks);
 
     let contours = generate_contours(&heightmap, 0.15);
 
@@ -439,10 +570,7 @@ pub fn generate_world() -> GeneratedWorld {
         }
     }
 
-    let distances = distance_map(
-        WORLD_RADIUS, 
-        water.iter().filter_map(|(c, i)| if *i > 0.0 { Some(c) } else { None }));
-    let humidity = compute_humidity(distances, &heightmap);
+    let humidity = compute_groundwater(&water, &rain, &heightmap);
 
     GeneratedWorld {
         heightmap,
@@ -484,7 +612,7 @@ impl GeneratedWorld {
         self.terrain[pos].clone()
     }
 
-    pub fn radius(&self) -> i64 {
+    pub fn radius(&self) -> i32 {
         self.heightmap.radius
     }
 }
