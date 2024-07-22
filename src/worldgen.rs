@@ -338,7 +338,10 @@ pub fn get_sea(heightmap: &Map<f32>) -> (HashSet<Coord>, HashSet<Coord>) {
     (sinks, sea)
 }
 
-pub fn simulate_water(heightmap: &mut Map<f32>, rain_map: &Map<f32>, sea: &HashSet<Coord>, sinks: &HashSet<Coord>) -> Map<f32> { 
+const SALT_REMOVAL: f32 = 0.13;
+const SALT_RANGE: f32 = 0.33;
+
+pub fn simulate_water(heightmap: &mut Map<f32>, rain_map: &Map<f32>, sea: &HashSet<Coord>, sinks: &HashSet<Coord>) -> (Map<f32>, Map<f32>) {  
     let mut watermap = Map::<f32>::new(heightmap.radius, 0.0);
 
     let sources = generate_separated_high_points(WATER_SOURCES, WORLD_RADIUS / 10, &rain_map);
@@ -360,6 +363,16 @@ pub fn simulate_water(heightmap: &mut Map<f32>, rain_map: &Map<f32>, sea: &HashS
                 lakes.push(lake);
             },
             None => break
+        }
+    }
+
+    let mut salt = distance_map(watermap.radius, sea.iter().copied());
+    normalize(&mut salt, |x| (SALT_RANGE - x).max(0.0) / SALT_RANGE);
+
+    for (coord, rain) in rain_map.iter() {
+        if *rain > 0.0 {
+            salt[coord] -= *rain * 0.3;
+            salt[coord] = salt[coord].max(0.0);
         }
     }
 
@@ -409,15 +422,19 @@ pub fn simulate_water(heightmap: &mut Map<f32>, rain_map: &Map<f32>, sea: &HashS
                 if !watermap.in_range(point + nearby) {
                     continue;
                 }
+                // Erode ground (down to sea level at most)
                 if this_range > 0 {
-                    heightmap[point + nearby] -= EROSION * watermap[point] / (this_range as f32) / erosion_range_raw.max(1.0).powf(EROSION_EXPONENT);
+                    let water_rate = watermap[point] / (this_range as f32) / erosion_range_raw.max(1.0).powf(EROSION_EXPONENT);
+                    heightmap[point + nearby] -= EROSION * water_rate;
                     heightmap[point + nearby] = heightmap[point + nearby].max(SEA_LEVEL);
+                    salt[point + nearby] -= SALT_REMOVAL * water_rate; // freshwater rivers reduce salt nearby
+                    salt[point + nearby] = salt[point + nearby].max(0.0);
                 }
             }
         }
     }
 
-    watermap
+    (watermap, salt)
 }
 
 struct WindSlice {
@@ -554,7 +571,7 @@ pub fn generate_world() -> GeneratedWorld {
 
     let (rain, temperature, atmo_humidity) = simulate_air(&heightmap, &sea, CoordVec::new(0, -1), CoordVec::new(1, 0));
 
-    let water = simulate_water(&mut heightmap, &rain, &sea, &sinks);
+    let (water, salt) = simulate_water(&mut heightmap, &rain, &sea, &sinks);
 
     let contours = generate_contours(&heightmap, 0.15);
 

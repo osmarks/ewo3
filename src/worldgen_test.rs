@@ -16,7 +16,7 @@ fn main() -> Result<()> {
     let (rain, temperature, atmo_humidity) = simulate_air(&heightmap, &sea, CoordVec::new(0, -1), CoordVec::new(1, 0));
 
     println!("hydro...");
-    let water = simulate_water(&mut heightmap, &rain, &sea, &sinks);
+    let (water, salt) = simulate_water(&mut heightmap, &rain, &sea, &sinks);
 
     println!("contours...");
     let contours = generate_contours(&heightmap, 0.15);
@@ -39,7 +39,7 @@ fn main() -> Result<()> {
         let row = position.y + WORLD_RADIUS;
         //let height = ((*value + 1.0) * 127.5) as u8;
         let green_channel = groundwater[position];
-        let red_channel = temperature[position];
+        let red_channel = salt[position];
         let blue_channel = water[position].min(1.0);
         image.put_pixel(col as u32, row as u32, Rgb::from([(red_channel * 255.0) as u8, (green_channel * 255.0) as u8, (blue_channel * 255.0) as u8]));
     }
