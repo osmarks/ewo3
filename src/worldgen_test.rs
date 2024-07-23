@@ -28,18 +28,21 @@ fn main() -> Result<()> {
         *entry = std::cmp::max(*entry, (steepness * 4000.0).abs() as u8);
     }
 
-    println!("humidity...");
+    println!("groundwater...");
     let groundwater = compute_groundwater(&water, &rain, &heightmap);
+
+    println!("soil...");
+    let soil_nutrients = soil_nutrients(&groundwater);
 
     println!("rendering...");
     let mut image = ImageBuffer::from_pixel((WORLD_RADIUS * 2 + 1) as u32, (WORLD_RADIUS * 2 + 1) as u32, Rgb::from([0u8, 0, 0]));
 
-    for (position, value) in heightmap.iter() {
+    for (position, height) in heightmap.iter() {
         let col = position.x + (position.y - (position.y & 1)) / 2 + WORLD_RADIUS;
         let row = position.y + WORLD_RADIUS;
-        //let height = ((*value + 1.0) * 127.5) as u8;
-        let green_channel = groundwater[position];
-        let red_channel = salt[position];
+        let height = *height * 0.5 + 1.0;
+        let green_channel = height;
+        let red_channel = soil_nutrients[position];
         let blue_channel = water[position].min(1.0);
         image.put_pixel(col as u32, row as u32, Rgb::from([(red_channel * 255.0) as u8, (green_channel * 255.0) as u8, (blue_channel * 255.0) as u8]));
     }

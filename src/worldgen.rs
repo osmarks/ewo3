@@ -301,7 +301,7 @@ pub fn distance_map<I: Iterator<Item=Coord>>(radius: i32, sources: I) -> Map<f32
 pub fn compute_groundwater(water: &Map<f32>, rain: &Map<f32>, heightmap: &Map<f32>) -> Map<f32> {
     let mut groundwater = distance_map(
         water.radius, 
-        water.iter().filter_map(|(c, i)| if *i > 0.0 { Some(c) } else { None }));;
+        water.iter().filter_map(|(c, i)| if *i > 0.0 { Some(c) } else { None }));
     percentilize(&mut groundwater, |x| (1.0 - x).powf(0.3));
     for (coord, h) in heightmap.iter() {
         groundwater[coord] -= *h * 0.05;
@@ -437,6 +437,19 @@ pub fn simulate_water(heightmap: &mut Map<f32>, rain_map: &Map<f32>, sea: &HashS
     (watermap, salt)
 }
 
+const NUTRIENT_NOISE_SCALE: f32 = 0.0015;
+
+// As a handwave, define soil nutrients to be partly randomized and partly based on water.
+// This kind of sort of makes sense because nitrogen is partly fixed by plants, which would have grown in water-having areas.
+pub fn soil_nutrients(groundwater: &Map<f32>) -> Map<f32> {
+    let mut soil_nutrients = Map::<f32>::from_fn(|cr| {
+        let c = to_cubic(cr);
+        noise_functions::OpenSimplex2s.seed(406).sample3([10.0 + c.x as f32 * NUTRIENT_NOISE_SCALE, c.y as f32 * NUTRIENT_NOISE_SCALE, c.z as f32 * NUTRIENT_NOISE_SCALE]) + groundwater[cr]
+    }, groundwater.radius);
+    percentilize(&mut soil_nutrients, |x| x.powf(0.4));
+    soil_nutrients
+}
+
 struct WindSlice {
     coord: Coord,
     humidity: f32, // hPa
@@ -560,7 +573,11 @@ pub enum TerrainType {
 pub struct GeneratedWorld {
     heightmap: Map<f32>,
     terrain: Map<TerrainType>,
-    humidity: Map<f32>
+    groundwater: Map<f32>,
+    salt: Map<f32>,
+    atmo_humidity: Map<f32>,
+    temperature: Map<f32>,
+    soil_nutrients: Map<f32>
 }
 
 pub fn generate_world() -> GeneratedWorld {
@@ -587,12 +604,18 @@ pub fn generate_world() -> GeneratedWorld {
         }
     }
 
-    let humidity = compute_groundwater(&water, &rain, &heightmap);
+    let groundwater = compute_groundwater(&water, &rain, &heightmap);
+
+    let soil_nutrients = soil_nutrients(&groundwater);
 
     GeneratedWorld {
         heightmap,
         terrain,
-        humidity
+        groundwater,
+        salt,
+        atmo_humidity,
+        temperature,
+        soil_nutrients
     }
 }
 
