@@ -804,7 +804,7 @@
     let inventory = [];
     let ws;
     const connect = () => {
-      ws = new WebSocket(window.location.protocol === "https:" ? "wss://ewo.osmarks.net/" : "ws://localhost:8080/");
+      ws = new WebSocket(window.location.protocol === "https:" ? "wss://ewo.osmarks.net/" : "ws://localhost:8011/");
       ws.addEventListener("message", (ev) => {
         const data = JSON.parse(ev.data);
         if (data.Display) {

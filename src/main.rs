@@ -1,16 +1,18 @@
-use hecs::{CommandBuffer, Entity, World};
+use hecs::{CommandBuffer, Entity, With, World};
 use futures_util::{stream::TryStreamExt, SinkExt, StreamExt};
 use indexmap::IndexMap;
+use smallvec::{smallvec, SmallVec};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio::sync::{mpsc, Mutex};
 use anyhow::{Result, Context, anyhow};
-use std::{collections::{hash_map::Entry, HashMap, HashSet, VecDeque}, convert::TryFrom, hash::{Hash, Hasher}, net::SocketAddr, sync::Arc, time::Duration};
+use std::{convert::TryFrom, hash::{Hash, Hasher}, net::SocketAddr, ops::DerefMut, sync::Arc, time::Duration};
 use slab::Slab;
 use serde::{Serialize, Deserialize};
 
 pub mod worldgen;
 pub mod map;
+pub mod plant;
 
 use map::*;
 
@@ -85,7 +87,8 @@ struct GameState {
     world: World,
     clients: Slab<Client>,
     ticks: u64,
-    map: worldgen::GeneratedWorld
+    map: worldgen::GeneratedWorld,
+    positions: PositionIndex
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -112,19 +115,79 @@ impl Item {
     }
 }
 
+struct PositionIndex {
+    particles: Map<Option<Entity>>,
+    entities: Map<Option<Entity>>,
+    terrain: Map<Option<Entity>>
+}
+
+impl PositionIndex {
+    fn new(radius: i32) -> Self {
+        Self {
+            particles: Map::new(radius, None),
+            entities: Map::new(radius, None),
+            terrain: Map::new(radius, None)
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PlayerCharacter;
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+enum MapLayer {
+    Particles,
+    Entities,
+    Terrain
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct Position(VecDeque<Coord>);
+struct Position {
+    layer: MapLayer,
+    coords: SmallVec<[Coord; 2]>
+}
 
 impl Position {
     fn head(&self) -> Coord {
-        *self.0.front().unwrap()
+        self.coords[0]
     }
 
-    fn single_tile(c: Coord) -> Self {
-        Self(VecDeque::from([c]))
+    fn single_tile(c: Coord, layer: MapLayer) -> Self {
+        Self {
+            layer,
+            coords: smallvec![c]
+        }
+    }
+
+    fn iter_coords(&self) -> impl Iterator<Item=Coord> + '_ {
+        self.coords.iter().copied()
+    }
+
+    fn record_for(&mut self, index: &mut PositionIndex, entity: Option<Entity>) {
+        let target_layer = match self.layer {
+            MapLayer::Particles => &mut index.particles,
+            MapLayer::Entities => &mut index.entities,
+            MapLayer::Terrain => &mut index.terrain,
+        };
+        for coord in self.coords.iter() {
+            target_layer[*coord] = entity;
+        }
+    }
+
+    // return value is whether it is now dead/positionless
+    fn remove_coord(&mut self, coord: Coord, index: &mut PositionIndex, entity: Entity) -> bool {
+        self.record_for(index, None);
+        self.coords.retain(|x| *x != coord);
+        self.record_for(index, Some(entity));
+        self.coords.len() > 0
+    }
+
+    fn move_into(&mut self, coord: Coord, index: &mut PositionIndex, entity: Entity) -> Coord {
+        self.record_for(index, None);
+        let fst = self.coords.remove(0);
+        self.coords.push(coord);
+        self.record_for(index, Some(entity));
+        fst
     }
 }
 
@@ -140,6 +203,9 @@ impl Health {
         else { self.0 / self.1 }
     }
 }
+
+#[derive(Debug, Clone)]
+struct ShrinkOnDeath;
 
 #[derive(Debug, Clone)]
 struct Render(char);
@@ -166,13 +232,7 @@ struct Enemy;
 struct MoveCost(StochasticNumber);
 
 #[derive(Debug, Clone)]
-struct Collidable;
-
-#[derive(Debug, Clone)]
 struct Velocity(CoordVec);
-
-#[derive(Debug, Clone)]
-struct Terrain;
 
 #[derive(Debug, Clone)]
 struct Obstruction { entry_multiplier: f32, exit_multiplier: f32 }
@@ -202,6 +262,15 @@ struct DespawnOnImpact;
 
 #[derive(Debug, Clone)]
 struct Inventory(indexmap::IndexMap<Item, u64>);
+
+#[derive(Debug, Clone)]
+struct Plant(plant::Genome);
+
+#[derive(Debug, Clone)]
+struct NewlyAdded; // ugly hack to work around ECS deficiencies
+
+#[derive(Debug, Clone)]
+struct BlocksEnemySpawn;
 
 impl Inventory {
     fn add(&mut self, item: Item, qty: u64) {
@@ -253,7 +322,7 @@ struct EnemySpec {
 }
 
 impl EnemySpec {
-    // Numbers ported from original EWO. Fudge constants added elsewhere. 
+    // Numbers ported from original EWO. Fudge constants added elsewhere.
     fn random() -> EnemySpec {
         match fastrand::usize(0..650) {
             0..=99 => EnemySpec { symbol: 'I', min_damage: 10.0, damage_range: 5.0, initial_health: 50.0, move_delay: 70, attack_cooldown: 10, ranged: false, drops: vec![], movement: 1 }, // IBIS
@@ -275,19 +344,8 @@ fn rng_from_hash<H: Hash>(x: H) -> fastrand::Rng {
     fastrand::Rng::with_seed(h.finish())
 }
 
-fn consume_energy_if_available(e: &mut Option<&mut Energy>, cost: f32) -> bool {
+fn consume_energy_if_available<R: DerefMut<Target=Energy>>(e: &mut Option<R>, cost: f32) -> bool {
     e.is_none() || e.as_mut().unwrap().try_consume(cost)
-}
-
-// Box-Muller transform
-fn normal() -> f32 {
-    let u = fastrand::f32();
-    let v = fastrand::f32();
-    (v * std::f32::consts::TAU).cos() * (-2.0 * u.ln()).sqrt()
-}
-
-fn normal_scaled(mu: f32, sigma: f32) -> f32 {
-    normal() * sigma + mu
 }
 
 fn triangle_distribution(min: f32, max: f32, mode: f32) -> f32 {
@@ -324,22 +382,14 @@ impl StochasticNumber {
 }
 
 async fn game_tick(state: &mut GameState) -> Result<()> {
-    let mut terrain_positions = HashMap::new();
-    let mut positions = HashMap::new();
-
-    for (entity, pos) in state.world.query_mut::<hecs::With<&Position, &Collidable>>() {
-        for subpos in pos.0.iter() {
-            positions.insert(*subpos, entity);
-        }
-    }
-
-    for (entity, pos) in state.world.query_mut::<hecs::With<&Position, &Terrain>>() {
-        for subpos in pos.0.iter() {
-            terrain_positions.insert(*subpos, entity);
-        }
-    }
-
     let mut buffer = hecs::CommandBuffer::new();
+
+    for (entity, position) in state.world.query_mut::<With<&mut Position, &NewlyAdded>>() {
+        position.record_for(&mut state.positions, Some(entity));
+        buffer.remove_one::<NewlyAdded>(entity);
+    }
+
+    buffer.run_on(&mut state.world);
 
     // Spawn enemies
     for (_entity, (pos, EnemyTarget { spawn_range, spawn_density, spawn_rate_inv, .. })) in state.world.query::<(&Position, &EnemyTarget)>().iter() {
@@ -349,9 +399,11 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
             let mut newpos = pos + sample_range(*spawn_range.end());
             let mut occupied = false;
             for _ in 0..(c as f32 / spawn_density * 0.005).ceil() as usize {
-                if positions.contains_key(&newpos) {
-                    occupied = true;
-                    break;
+                if let Some(entity) = state.positions.entities[newpos] {
+                    if state.world.get::<&BlocksEnemySpawn>(entity).is_ok() {
+                        occupied = true;
+                        break;
+                    }
                 }
                 newpos = pos + sample_range(*spawn_range.end());
             }
@@ -364,29 +416,31 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                         Health(spec.initial_health, spec.initial_health),
                         Enemy,
                         RangedAttack { damage: StochasticNumber::triangle_from_min_range(spec.min_damage, spec.damage_range), energy: spec.attack_cooldown as f32, range: 4 },
-                        Position::single_tile(newpos),
+                        Position::single_tile(newpos, MapLayer::Entities),
                         MoveCost(StochasticNumber::Triangle { min: 0.0, max: 2.0 * spec.move_delay as f32 / 3.0, mode: spec.move_delay as f32 / 3.0 }),
-                        Collidable,
                         DespawnRandomly(RANDOM_DESPAWN_INV_RATE),
                         Energy { regeneration_rate: 1.0, current: 0.0, burst: 0.0 },
                         Drops(spec.drops),
-                        Jump(spec.movement)
-                    ));
+                        Jump(spec.movement),
+                        NewlyAdded,
+                        BlocksEnemySpawn
+                    ))
                 } else {
                     buffer.spawn((
                         Render(spec.symbol),
                         Health(spec.initial_health, spec.initial_health),
                         Enemy,
                         Attack { damage: StochasticNumber::triangle_from_min_range(spec.min_damage, spec.damage_range), energy: spec.attack_cooldown as f32 },
-                        Position::single_tile(newpos),
+                        Position::single_tile(newpos, MapLayer::Entities),
                         MoveCost(StochasticNumber::Triangle { min: 0.0, max: 2.0 * spec.move_delay as f32 / 3.0, mode: spec.move_delay as f32 / 3.0 }),
-                        Collidable,
                         DespawnRandomly(RANDOM_DESPAWN_INV_RATE),
                         Energy { regeneration_rate: 1.0, current: 0.0, burst: 0.0 },
                         Drops(spec.drops),
-                        Jump(spec.movement)
-                    ));
-                }
+                        Jump(spec.movement),
+                        NewlyAdded,
+                        BlocksEnemySpawn
+                    ))
+                };
             }
         }
     }
@@ -396,7 +450,7 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
         let pos = pos.head();
 
         for direction in DIRECTIONS.iter() {
-            if let Some(target) = positions.get(&(pos + *direction)) {
+            if let Some(target) = &state.positions.entities[pos + *direction] {
                 if let Ok(_) = state.world.get::<&EnemyTarget>(*target) {
                     buffer.insert_one(entity, MovingInto(pos + *direction));
                     continue;
@@ -434,8 +488,10 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                         Enemy,
                         Attack { damage: ranged_attack.damage, energy: 0.0 },
                         Velocity(atk_dir),
-                        Position::single_tile(pos),
-                        DespawnOnTick(state.ticks.wrapping_add(ranged_attack.range))
+                        Position::single_tile(pos, MapLayer::Particles),
+                        DespawnOnTick(state.ticks.wrapping_add(ranged_attack.range)),
+                        DespawnOnImpact,
+                        NewlyAdded
                     ));
                 }
             } else {
@@ -483,13 +539,14 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                     Input::DownRight => next_movement = CoordVec::new(0, 1),
                     Input::DownLeft => next_movement = CoordVec::new(-1, 1),
                     Input::Dig => {
-                        if terrain_positions.get(&position).is_none() && energy.try_consume(5.0) {
+                        // Dig a hole
+                        if state.positions.terrain[position].is_none() && energy.try_consume(5.0) {
                             buffer.spawn((
-                                Terrain,
                                 Render('_'),
                                 Obstruction { entry_multiplier: 5.0, exit_multiplier: 5.0 },
                                 DespawnOnTick(state.ticks.wrapping_add(StochasticNumber::triangle_from_min_range(5000.0, 5000.0).sample().round() as u64)),
-                                Position::single_tile(position)
+                                Position::single_tile(position, MapLayer::Terrain),
+                                NewlyAdded
                             ));
                             inventory.add(Item::Dirt, StochasticNumber::triangle_from_min_range(1.0, 3.0).sample_rounded());
                         }
@@ -498,7 +555,7 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                 Err(e) => return Err(e.into())
             }
         }
-        
+
         let target = position + next_movement;
         if state.map.get_terrain(target).entry_cost().is_some() && target != position {
             buffer.insert_one(client.entity, MovingInto(target));
@@ -507,13 +564,15 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
 
     buffer.run_on(&mut state.world);
 
-    let mut despawn_buffer = HashSet::new();
+    let mut despawn_buffer = Vec::new();
 
     // This might lead to a duping glitch, which would at least be funny.
     // TODO: Players should drop items on disconnect.
-    let kill = |buffer: &mut CommandBuffer, despawn_buffer: &mut HashSet<Entity>, state: &GameState, entity: Entity, killer: Option<Entity>, position: Option<Coord>| {
-        let position = position.unwrap_or_else(|| state.world.get::<&Position>(entity).unwrap().head());
-        despawn_buffer.insert(entity);
+    // The final position argument is in some sense redundant but exists to satisfy dynamic borrow checking.
+    let kill = |buffer: &mut CommandBuffer, despawn_buffer: &mut Vec<(Entity, Position)>, state: &GameState, entity: Entity, killer: Option<Entity>| {
+        let position = (*state.world.get::<&Position>(entity).unwrap()).clone();
+        let position_head = position.head();
+        despawn_buffer.push((entity, position));
         buffer.despawn(entity);
         let mut materialized_drops = Inventory::empty();
         if let Ok(drops) = state.world.get::<&Drops>(entity) {
@@ -534,22 +593,25 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
         } else { false };
         if !killer_consumed_items && !materialized_drops.is_empty() {
             buffer.spawn((
-                Position::single_tile(position),
+                Position::single_tile(position_head, MapLayer::Entities),
                 Render('☒'),
-                materialized_drops
+                materialized_drops,
+                NewlyAdded,
+                Health(10.0, 10.0)
             ));
         }
     };
 
+    let mut about_to_move = Vec::new();
     // Process motion and attacks
-    for (entity, (current_pos, MovingInto(target_pos), damage, mut energy, move_cost, despawn_on_impact)) in state.world.query::<(&mut Position, &MovingInto, Option<&mut Attack>, Option<&mut Energy>, Option<&MoveCost>, Option<&DespawnOnImpact>)>().iter() {
+    for (entity, (current_pos, MovingInto(target_pos), damage, mut energy, move_cost, despawn_on_impact)) in state.world.query::<(&Position, &MovingInto, Option<&mut Attack>, Option<&mut Energy>, Option<&MoveCost>, Option<&DespawnOnImpact>)>().iter() {
         let mut move_cost = move_cost.map(|x| x.0.sample()).unwrap_or(0.0);
 
         move_cost *= (hex_distance(*target_pos, current_pos.head()) as f32).powf(0.5);
-        
-        for tile in current_pos.0.iter() {
+
+        for tile in current_pos.iter_coords() {
             // TODO: perhaps large enemies should not be exponentially more vulnerable to environmental hazards
-            if let Some(current_terrain) = terrain_positions.get(tile) {
+            if let Some(current_terrain) = &state.positions.terrain[tile] {
                 if let Ok(obstruction) = state.world.get::<&Obstruction>(*current_terrain) {
                     move_cost *= obstruction.exit_multiplier;
                 }
@@ -557,7 +619,7 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
         }
 
         // TODO: attacks into obstructions are still cheap; is this desirable?
-        if let Some(target_terrain) = terrain_positions.get(target_pos) {
+        if let Some(target_terrain) = &state.positions.terrain[*target_pos] {
             if let Ok(obstruction) = state.world.get::<&Obstruction>(*target_terrain) {
                 move_cost *= obstruction.entry_multiplier;
             }
@@ -565,9 +627,9 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
 
         if let Some(entry_cost) = state.map.get_terrain(*target_pos).entry_cost() {
             move_cost += entry_cost as f32;
-            let entry = match positions.entry(*target_pos) {
-                Entry::Occupied(o) => {
-                    let target_entity = *o.get();
+            let can_move = match &state.positions.entities[*target_pos] {
+                Some(target_entity) => {
+                    let target_entity = target_entity.clone();
                     if let Ok(mut x) = state.world.get::<&mut Health>(target_entity) {
                         match damage {
                             Some(Attack { damage, energy: energy_cost }) => {
@@ -578,30 +640,48 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                             _ => ()
                         }
                         if despawn_on_impact.is_some() {
-                            kill(&mut buffer, &mut despawn_buffer, &state, entity, Some(target_entity), Some(*target_pos));
+                            kill(&mut buffer, &mut despawn_buffer, &state, entity, Some(target_entity));
                         }
                         if x.0 < 0.0 {
-                            kill(&mut buffer, &mut despawn_buffer, &state, target_entity, Some(entity), Some(*target_pos));
-                            Some(Entry::Occupied(o))
+                            // TODO: this may be totally broken
+                            if state.world.get::<&ShrinkOnDeath>(target_entity).is_ok() {
+                                let mut positions = state.world.get::<&mut Position>(target_entity).unwrap();
+
+                                if positions.remove_coord(*target_pos, &mut state.positions, target_entity) {
+                                    std::mem::drop(positions);
+                                    kill(&mut buffer, &mut despawn_buffer, &state, target_entity, Some(entity));
+                                } else {
+                                    x.0 = x.1; // reset health
+                                }
+                            } else {
+                                kill(&mut buffer, &mut despawn_buffer, &state, target_entity, Some(entity));
+                            }
+                            true // murdered to death; space is now open
                         } else {
-                            None
+                            false // still alive; cannot move there
                         }
                     } else {
-                        None // no "on pickup" exists; emulated with health 0
+                        false // if no health, cannot be destroyed
                     }
                 },
-                Entry::Vacant(v) => Some(Entry::Vacant(v))
+                None => true // empty, can move
             };
-            if let Some(entry) = entry {
-                // TODO: perhaps this should be applied to attacks too?
-                if consume_energy_if_available(&mut energy, move_cost) {
-                    *entry.or_insert(entity) = entity;
-                    positions.remove(&current_pos.0.pop_back().unwrap());
-                    current_pos.0.push_front(*target_pos);
-                }
+            if can_move {
+                about_to_move.push((entity, *target_pos, move_cost));
             }
         }
         buffer.remove_one::<MovingInto>(entity);
+    }
+
+    for (entity, target_pos, move_cost) in about_to_move.drain(..) {
+        // TODO: perhaps this should be applied to attacks too?
+        let mut energy = state.world.get::<&mut Energy>(entity).ok();
+        let mut current_pos = state.world.get::<&mut Position>(entity).unwrap() ;
+        if consume_energy_if_available(&mut energy, move_cost) {
+            state.positions.entities[target_pos] = Some(entity.clone());
+            let tail_pos = current_pos.move_into(target_pos, &mut state.positions, entity);
+            state.positions.entities[tail_pos] = None;
+        }
     }
 
     buffer.run_on(&mut state.world);
@@ -613,26 +693,31 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
     // Process transient entities
     for (entity, tick) in state.world.query::<&DespawnOnTick>().iter() {
         if state.ticks == tick.0 {
-            kill(&mut buffer, &mut despawn_buffer, &state, entity, None, None);
+            kill(&mut buffer, &mut despawn_buffer, &state, entity, None);
         }
     }
 
     for (entity, DespawnRandomly(inv_rate)) in state.world.query::<&DespawnRandomly>().iter() {
         if fastrand::u64(0..*inv_rate) == 0 {
-            kill(&mut buffer, &mut despawn_buffer, &state, entity, None, None);
+            kill(&mut buffer, &mut despawn_buffer, &state, entity, None);
         }
     }
 
     buffer.run_on(&mut state.world);
 
-    let mut delete = vec![];
-    for (position, entity) in positions.iter() {
-        if despawn_buffer.contains(entity) {
-            delete.push(*position);
+    for (entity, position) in despawn_buffer.drain(..) {
+        for coord in position.iter_coords() {
+            // TODO: fix
+            if state.positions.particles[coord] == Some(entity) {
+                state.positions.particles[coord] = None;
+            }
+            if state.positions.entities[coord] == Some(entity) {
+                state.positions.entities[coord] = None;
+            }
+            if state.positions.terrain[coord] == Some(entity) {
+                state.positions.terrain[coord] = None;
+            }
         }
-    }
-    for position in delete {
-        positions.remove(&position);
     }
 
     // Send views to clients
@@ -646,13 +731,13 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                 let pos = pos + offset;
                 let mut rng = rng_from_hash(pos);
 
-                if let Some(entity) = positions.get(&pos) {
+                if let Some(entity) = &state.positions.particles[pos].or(state.positions.entities[pos]) {
                     let render = state.world.get::<&Render>(*entity)?;
                     let health = if let Ok(h) = state.world.get::<&Health>(*entity) {
                         h.pct()
                     } else { 1.0 };
                     nearby.push((offset.x, offset.y, render.0, health));
-                } else if let Some(entity) = terrain_positions.get(&pos) {
+                } else if let Some(entity) = &state.positions.terrain[pos] {
                     let render = state.world.get::<&Render>(*entity)?;
                     nearby.push((offset.x, offset.y, render.0, 1.0));
                 } else if let Some(terrain) = state.map.get_terrain(pos).symbol() {
@@ -704,10 +789,9 @@ fn add_new_player(state: &mut GameState) -> Result<Entity> {
         }
     };
     Ok(state.world.spawn((
-        Position::single_tile(pos),
+        Position::single_tile(pos, MapLayer::Entities),
         PlayerCharacter,
         Render(random_identifier()),
-        Collidable,
         Attack { damage: StochasticNumber::Triangle { min: 20.0, max: 60.0, mode: 20.0 }, energy: 5.0 },
         Health(128.0, 128.0),
         EnemyTarget {
@@ -717,7 +801,9 @@ fn add_new_player(state: &mut GameState) -> Result<Entity> {
             aggression_range: 5
         },
         Energy { current: 0.0, regeneration_rate: 1.0, burst: 5.0 },
-        Inventory::empty()
+        Inventory::empty(),
+        NewlyAdded,
+        BlocksEnemySpawn
     )))
 }
 
@@ -728,7 +814,7 @@ async fn load_world() -> Result<worldgen::GeneratedWorld> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let addr = std::env::args().nth(1).unwrap_or_else(|| "0.0.0.0:8080".to_string());
+    let addr = std::env::args().nth(1).unwrap_or_else(|| "0.0.0.0:8011".to_string());
 
     let world = match load_world().await {
         Ok(world) => world,
@@ -744,8 +830,26 @@ async fn main() -> Result<()> {
         world: World::new(),
         clients: Slab::new(),
         ticks: 0,
+        positions: PositionIndex::new(world.radius),
         map: world
     }));
+
+    {
+        let mut state = state.lock().await;
+        let count = count_hexes(state.map.radius() / 5);
+        let mut batch = Vec::with_capacity(count as usize);
+        for (distance, offset) in hex_range(state.map.radius() / 5) {
+            batch.push((
+                Position::single_tile(Coord::origin() + offset * 5, MapLayer::Entities),
+                Render('+'),
+                Health(100.0, 100.0),
+                //ShrinkOnDeath,
+                Plant(plant::Genome::random()),
+                NewlyAdded
+            ));
+        }
+        state.world.spawn_batch(batch);
+    }
 
     let try_socket = TcpListener::bind(&addr).await;
     let listener = try_socket.expect("Failed to bind");
@@ -786,6 +890,13 @@ async fn main() -> Result<()> {
             println!("conn result {:?}", handle_connection(stream, addr, frames_rx, inputs_tx).await);
             let mut state = state_.lock().await;
             state.clients.remove(id);
+            let mut pos = match state.world.get::<&Position>(entity) {
+                Err(_) => return,
+                Ok(p) => {
+                    (*p).clone()
+                }
+            };
+            pos.record_for(&mut state.positions, None);
             let _ = state.world.despawn(entity);
         });
     }

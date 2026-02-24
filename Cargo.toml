@@ -22,10 +22,11 @@ indexmap = "2"
 image = { version = "0.25", default-features = false, features = ["png"] }
 rayon = "1"
 bincode = { version = "2.0.0-rc.3", features = ["serde"] }
+smallvec = "1"
 
 [[bin]]
 name = "worldgen"
 path = "src/worldgen_test.rs"
 
-[target.x86_64-unknown-linux-gnu]
-rustflags = ["-Ctarget-cpu=native"]
+[profile.release]
+debug = true
