@@ -1,3 +1,6 @@
+#![feature(test)]
+extern crate test;
+
 use hecs::{CommandBuffer, Entity, With, World};
 use futures_util::{stream::TryStreamExt, SinkExt, StreamExt};
 use indexmap::IndexMap;
@@ -88,7 +91,23 @@ struct GameState {
     clients: Slab<Client>,
     ticks: u64,
     map: worldgen::GeneratedWorld,
+    baseline_soil_nutrients: Map<f32>,
+    baseline_water: Map<f32>,
+    baseline_salt: Map<f32>,
+    baseline_temperature: Map<f32>,
+    dynamic_soil_nutrients: Map<f32>,
+    dynamic_water: Map<f32>,
     positions: PositionIndex
+}
+
+impl GameState {
+    fn actual_water(&self, pos: Coord) -> f32 {
+        self.baseline_water[pos] + self.dynamic_water[pos]
+    }
+
+    fn actual_soil_nutrients(&self, pos: Coord) -> f32 {
+        self.baseline_soil_nutrients[pos] + self.dynamic_soil_nutrients[pos]
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -264,7 +283,10 @@ struct DespawnOnImpact;
 struct Inventory(indexmap::IndexMap<Item, u64>);
 
 #[derive(Debug, Clone)]
-struct Plant(plant::Genome);
+struct Plant {
+    genome: plant::Genome,
+    current_size: f32
+}
 
 #[derive(Debug, Clone)]
 struct NewlyAdded; // ugly hack to work around ECS deficiencies
@@ -381,6 +403,10 @@ impl StochasticNumber {
     }
 }
 
+const PLANT_TICK_DELAY: u64 = 128;
+const FIELD_DECAY_DELAY: u64 = 100;
+const PLANT_GROWTH_SCALE: f32 = 0.01;
+
 async fn game_tick(state: &mut GameState) -> Result<()> {
     let mut buffer = hecs::CommandBuffer::new();
 
@@ -390,6 +416,16 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
     }
 
     buffer.run_on(&mut state.world);
+
+    if state.ticks % FIELD_DECAY_DELAY == 0 {
+        state.baseline_soil_nutrients.for_each_mut(|nutrients| *nutrients *= 0.999);
+    } else if state.ticks % FIELD_DECAY_DELAY == 1 {
+        state.baseline_water.for_each_mut(|water| *water *= 0.999);
+    } else if state.ticks % FIELD_DECAY_DELAY == 2 {
+        state.dynamic_soil_nutrients = smooth(&state.dynamic_soil_nutrients, 3);
+    } else if state.ticks % FIELD_DECAY_DELAY == 3 {
+        state.dynamic_water = smooth(&state.dynamic_water, 3);
+    }
 
     // Spawn enemies
     for (_entity, (pos, EnemyTarget { spawn_range, spawn_density, spawn_rate_inv, .. })) in state.world.query::<(&Position, &EnemyTarget)>().iter() {
@@ -442,6 +478,22 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                     ))
                 };
             }
+        }
+    }
+
+    // Run plant simulations.
+    for (entity, (pos, plant)) in state.world.query::<(&Position, &mut Plant)>().iter() {
+        if (entity.id() as u64) % PLANT_TICK_DELAY == state.ticks % PLANT_TICK_DELAY {
+            let pos = pos.head();
+            let water = state.actual_soil_nutrients(pos);
+            let soil_nutrients = state.actual_soil_nutrients(pos);
+            let salt = state.baseline_salt[pos];
+            let temperature = state.baseline_temperature[pos];
+            let base_growth_rate = plant.genome.effective_growth_rate(soil_nutrients, water, temperature, salt);
+            plant.current_size += base_growth_rate * PLANT_GROWTH_SCALE * plant.current_size.powf(-0.25); // allometric scaling law
+            plant.current_size = plant.current_size.min(plant.genome.max_size);
+            let can_reproduce = plant.current_size >= plant.genome.max_size * plant.genome.reproductive_size_fraction();
+            //state.dynamic_soil_nutrients;
         }
     }
 
@@ -826,12 +878,25 @@ async fn main() -> Result<()> {
         }
     };
 
+    let baseline_soil_nutrients = world.soil_nutrients.clone();
+    let baseline_water = world.groundwater.clone();
+    let baseline_salt = world.salt.clone();
+    let baseline_temperature = world.temperature.clone();
+    let dynamic_soil_nutrients = baseline_soil_nutrients.clone();
+    let dynamic_water = baseline_water.clone();
+
     let state = Arc::new(Mutex::new(GameState {
         world: World::new(),
         clients: Slab::new(),
         ticks: 0,
         positions: PositionIndex::new(world.radius),
-        map: world
+        map: world,
+        baseline_soil_nutrients,
+        baseline_water,
+        baseline_salt,
+        baseline_temperature,
+        dynamic_soil_nutrients,
+        dynamic_water
     }));
 
     {
@@ -844,7 +909,7 @@ async fn main() -> Result<()> {
                 Render('+'),
                 Health(100.0, 100.0),
                 //ShrinkOnDeath,
-                Plant(plant::Genome::random()),
+                Plant { genome: plant::Genome::random(), current_size: 0.0 },
                 NewlyAdded
             ));
         }
@@ -862,9 +927,11 @@ async fn main() -> Result<()> {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             let mut state = state.lock().await;
+            let time = std::time::Instant::now();
             if let Err(e) = game_tick(&mut state).await {
                 println!("{:?}", e);
             }
+            println!("Tick time: {:?}", time.elapsed());
             interval.tick().await;
         }
     });
