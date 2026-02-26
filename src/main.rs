@@ -92,17 +92,17 @@ struct GameState {
     ticks: u64,
     map: worldgen::GeneratedWorld,
     baseline_soil_nutrients: Map<f32>,
-    baseline_water: Map<f32>,
+    baseline_groundwater: Map<f32>,
     baseline_salt: Map<f32>,
     baseline_temperature: Map<f32>,
     dynamic_soil_nutrients: Map<f32>,
-    dynamic_water: Map<f32>,
+    dynamic_groundwater: Map<f32>,
     positions: PositionIndex
 }
 
 impl GameState {
-    fn actual_water(&self, pos: Coord) -> f32 {
-        self.baseline_water[pos] + self.dynamic_water[pos]
+    fn actual_groundwater(&self, pos: Coord) -> f32 {
+        self.baseline_groundwater[pos] + self.dynamic_groundwater[pos]
     }
 
     fn actual_soil_nutrients(&self, pos: Coord) -> f32 {
@@ -406,6 +406,11 @@ impl StochasticNumber {
 const PLANT_TICK_DELAY: u64 = 128;
 const FIELD_DECAY_DELAY: u64 = 100;
 const PLANT_GROWTH_SCALE: f32 = 0.01;
+const SOIL_NUTRIENT_CONSUMPTION_RATE: f32 = 0.04;
+const WATER_CONSUMPTION_RATE: f32 = 0.02;
+const PLANT_IDLE_WATER_CONSUMPTION_OFFSET: f32 = 0.05;
+const PLANT_DIEOFF_THRESHOLD: f32 = 0.01;
+const PLANT_DIEOFF_RATE: f32 = 0.005;
 
 async fn game_tick(state: &mut GameState) -> Result<()> {
     let mut buffer = hecs::CommandBuffer::new();
@@ -418,14 +423,52 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
     buffer.run_on(&mut state.world);
 
     if state.ticks % FIELD_DECAY_DELAY == 0 {
-        state.baseline_soil_nutrients.for_each_mut(|nutrients| *nutrients *= 0.999);
+        state.dynamic_soil_nutrients.for_each_mut(|nutrients| *nutrients *= 0.999);
     } else if state.ticks % FIELD_DECAY_DELAY == 1 {
-        state.baseline_water.for_each_mut(|water| *water *= 0.999);
+        state.dynamic_groundwater.for_each_mut(|water| *water *= 0.999);
     } else if state.ticks % FIELD_DECAY_DELAY == 2 {
         state.dynamic_soil_nutrients = smooth(&state.dynamic_soil_nutrients, 3);
     } else if state.ticks % FIELD_DECAY_DELAY == 3 {
-        state.dynamic_water = smooth(&state.dynamic_water, 3);
+        state.dynamic_groundwater = smooth(&state.dynamic_groundwater, 3);
     }
+
+    let mut despawn_buffer = Vec::new();
+
+    // This might lead to a duping glitch, which would at least be funny.
+    // TODO: Players should drop items on disconnect.
+    // The final position argument is in some sense redundant but exists to satisfy dynamic borrow checking.
+    let kill = |buffer: &mut CommandBuffer, despawn_buffer: &mut Vec<(Entity, Position)>, state: &GameState, entity: Entity, killer: Option<Entity>| {
+        let position = (*state.world.get::<&Position>(entity).unwrap()).clone();
+        let position_head = position.head();
+        despawn_buffer.push((entity, position));
+        buffer.despawn(entity);
+        let mut materialized_drops = Inventory::empty();
+        if let Ok(drops) = state.world.get::<&Drops>(entity) {
+            for (drop, frequency) in drops.0.iter() {
+                materialized_drops.add(drop.clone(), frequency.sample_rounded())
+            }
+        }
+        if let Ok(other_inv) = state.world.get::<&Inventory>(entity) {
+            materialized_drops.extend(&other_inv);
+        }
+        let killer_consumed_items = if let Some(killer) = killer {
+            if let Ok(mut inv) = state.world.get::<&mut Inventory>(killer) {
+                inv.extend(&materialized_drops);
+                true
+            } else {
+                false
+            }
+        } else { false };
+        if !killer_consumed_items && !materialized_drops.is_empty() {
+            buffer.spawn((
+                Position::single_tile(position_head, MapLayer::Entities),
+                Render('☒'),
+                materialized_drops,
+                NewlyAdded,
+                Health(10.0, 10.0)
+            ));
+        }
+    };
 
     // Spawn enemies
     for (_entity, (pos, EnemyTarget { spawn_range, spawn_density, spawn_rate_inv, .. })) in state.world.query::<(&Position, &EnemyTarget)>().iter() {
@@ -485,15 +528,28 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
     for (entity, (pos, plant)) in state.world.query::<(&Position, &mut Plant)>().iter() {
         if (entity.id() as u64) % PLANT_TICK_DELAY == state.ticks % PLANT_TICK_DELAY {
             let pos = pos.head();
-            let water = state.actual_soil_nutrients(pos);
+            let water = state.actual_groundwater(pos);
             let soil_nutrients = state.actual_soil_nutrients(pos);
             let salt = state.baseline_salt[pos];
             let temperature = state.baseline_temperature[pos];
             let base_growth_rate = plant.genome.effective_growth_rate(soil_nutrients, water, temperature, salt);
+            if base_growth_rate < PLANT_DIEOFF_THRESHOLD {
+                if let Ok(mut health) = state.world.get::<&mut Health>(entity) {
+                    health.0 -= PLANT_DIEOFF_RATE;
+                    if health.0 <= 0.0 {
+                        // TODO: this is inelegant and should be shared with the other death code
+                        // also, it might break the position tracker
+                        kill(&mut buffer, &mut despawn_buffer, &state, entity, None);
+                    }
+                }
+            }
+            let original_size = plant.current_size;
             plant.current_size += base_growth_rate * PLANT_GROWTH_SCALE * plant.current_size.powf(-0.25); // allometric scaling law
             plant.current_size = plant.current_size.min(plant.genome.max_size);
+            let difference = (plant.current_size - original_size).max(0.0);
             let can_reproduce = plant.current_size >= plant.genome.max_size * plant.genome.reproductive_size_fraction();
-            //state.dynamic_soil_nutrients;
+            state.dynamic_soil_nutrients[pos] -= difference * SOIL_NUTRIENT_CONSUMPTION_RATE;
+            state.dynamic_groundwater[pos] -= (difference + PLANT_IDLE_WATER_CONSUMPTION_OFFSET) * WATER_CONSUMPTION_RATE * plant.genome.water_efficiency();
         }
     }
 
@@ -592,10 +648,12 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                     Input::DownLeft => next_movement = CoordVec::new(-1, 1),
                     Input::Dig => {
                         // Dig a hole
+                        // TODO: work out geology in more detail; maybe you shouldn't be able to dig anything
                         if state.positions.terrain[position].is_none() && energy.try_consume(5.0) {
                             buffer.spawn((
                                 Render('_'),
                                 Obstruction { entry_multiplier: 5.0, exit_multiplier: 5.0 },
+                                // TODO: do this more cleanly
                                 DespawnOnTick(state.ticks.wrapping_add(StochasticNumber::triangle_from_min_range(5000.0, 5000.0).sample().round() as u64)),
                                 Position::single_tile(position, MapLayer::Terrain),
                                 NewlyAdded
@@ -615,44 +673,6 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
     }
 
     buffer.run_on(&mut state.world);
-
-    let mut despawn_buffer = Vec::new();
-
-    // This might lead to a duping glitch, which would at least be funny.
-    // TODO: Players should drop items on disconnect.
-    // The final position argument is in some sense redundant but exists to satisfy dynamic borrow checking.
-    let kill = |buffer: &mut CommandBuffer, despawn_buffer: &mut Vec<(Entity, Position)>, state: &GameState, entity: Entity, killer: Option<Entity>| {
-        let position = (*state.world.get::<&Position>(entity).unwrap()).clone();
-        let position_head = position.head();
-        despawn_buffer.push((entity, position));
-        buffer.despawn(entity);
-        let mut materialized_drops = Inventory::empty();
-        if let Ok(drops) = state.world.get::<&Drops>(entity) {
-            for (drop, frequency) in drops.0.iter() {
-                materialized_drops.add(drop.clone(), frequency.sample_rounded())
-            }
-        }
-        if let Ok(other_inv) = state.world.get::<&Inventory>(entity) {
-            materialized_drops.extend(&other_inv);
-        }
-        let killer_consumed_items = if let Some(killer) = killer {
-            if let Ok(mut inv) = state.world.get::<&mut Inventory>(killer) {
-                inv.extend(&materialized_drops);
-                true
-            } else {
-                false
-            }
-        } else { false };
-        if !killer_consumed_items && !materialized_drops.is_empty() {
-            buffer.spawn((
-                Position::single_tile(position_head, MapLayer::Entities),
-                Render('☒'),
-                materialized_drops,
-                NewlyAdded,
-                Health(10.0, 10.0)
-            ));
-        }
-    };
 
     let mut about_to_move = Vec::new();
     // Process motion and attacks
@@ -879,11 +899,11 @@ async fn main() -> Result<()> {
     };
 
     let baseline_soil_nutrients = world.soil_nutrients.clone();
-    let baseline_water = world.groundwater.clone();
+    let baseline_groundwater = world.groundwater.clone();
     let baseline_salt = world.salt.clone();
     let baseline_temperature = world.temperature.clone();
-    let dynamic_soil_nutrients = baseline_soil_nutrients.clone();
-    let dynamic_water = baseline_water.clone();
+    let dynamic_soil_nutrients = Map::new(world.radius, 0.0);
+    let dynamic_groundwater = Map::new(world.radius, 0.0);
 
     let state = Arc::new(Mutex::new(GameState {
         world: World::new(),
@@ -892,11 +912,11 @@ async fn main() -> Result<()> {
         positions: PositionIndex::new(world.radius),
         map: world,
         baseline_soil_nutrients,
-        baseline_water,
+        baseline_groundwater,
         baseline_salt,
         baseline_temperature,
         dynamic_soil_nutrients,
-        dynamic_water
+        dynamic_groundwater
     }));
 
     {
@@ -907,9 +927,9 @@ async fn main() -> Result<()> {
             batch.push((
                 Position::single_tile(Coord::origin() + offset * 5, MapLayer::Entities),
                 Render('+'),
-                Health(100.0, 100.0),
+                Health(10.0, 10.0),
                 //ShrinkOnDeath,
-                Plant { genome: plant::Genome::random(), current_size: 0.0 },
+                Plant { genome: plant::Genome::random(), current_size: 0.1 },
                 NewlyAdded
             ));
         }

@@ -216,7 +216,8 @@ pub fn smooth(map: &Map<f32>, radius: i32) -> Map<f32> {
         kernel[(offset.x as usize + radius as usize, offset.y as usize + radius as usize)] = 1.0 / count_hexes(radius) as f32;
     }
 
-    let result = ConvExt::conv(&data, &kernel, ConvMode::Same, PaddingMode::Zeros).unwrap();
+    // TODO: this is still really slow!
+    let result = ConvExt::conv(&data, &kernel, ConvMode::Same, PaddingMode::Replicate).unwrap();
 
     Map {
         radius: map.radius,

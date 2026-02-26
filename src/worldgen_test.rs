@@ -231,6 +231,7 @@ fn main() -> Result<()> {
     let r1 = field_range(f1, &render_data);
     let r2 = field_range(f2, &render_data);
     let r3 = field_range(f3, &render_data);
+    println!("ranges: {:?}, {:?}, {:?}", r1, r2, r3);
 
     for (position, _) in heightmap.iter() {
         let col = position.x + (position.y - (position.y & 1)) / 2 + image_radius;

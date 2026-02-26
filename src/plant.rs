@@ -10,6 +10,8 @@ pub enum CropType {
 pub struct Genome {
     crop_type: CropType,
     // polygenic traits; parameterized as N(0,1) (allegedly)
+    // groundwater is [0,1] so this is sort of questionable
+    // TODO: reparameterize or something
     growth_rate: f32,
     nutrient_addition_rate: f32,
     optimal_water_level: f32,
@@ -56,7 +58,7 @@ impl Genome {
             - self.water_tolerance * 0.2
             - self.temperature_tolerance * 0.2
             - self.salt_tolerance * 0.2;
-        base * (-nutrients.min(0.0)).exp()
+        (base * (-nutrients.min(0.0)).exp()).max(0.0)
     }
 
     pub fn random() -> Genome {
@@ -89,6 +91,11 @@ impl Genome {
             salt_tolerance: normal() + salt_tolerance,
             max_size
         }
+    }
+
+    // TODO: this might be unreasonable
+    pub fn water_efficiency(&self) -> f32 {
+        sigmoid(self.optimal_water_level * 3.0 - 1.0)
     }
 
     pub fn hybridize(&self, other: &Genome) -> Option<Genome> {
