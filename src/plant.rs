@@ -1,4 +1,6 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CropType {
     Grass,
     EucalyptusTree,
@@ -6,7 +8,7 @@ pub enum CropType {
     GoldenWattleTree
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Genome {
     crop_type: CropType,
     // polygenic traits; parameterized as N(0,1) (allegedly)
@@ -59,6 +61,10 @@ impl Genome {
             - self.temperature_tolerance * 0.2
             - self.salt_tolerance * 0.2;
         (base * (-nutrients.min(0.0)).exp()).max(0.0)
+    }
+
+    pub fn nutrient_addition_rate(&self) -> f32 {
+        self.nutrient_addition_rate.max(0.0)
     }
 
     pub fn random() -> Genome {

@@ -2,6 +2,7 @@
 name = "ewo3"
 version = "0.1.0"
 edition = "2021"
+default-run = "ewo3"
 
 [dependencies]
 hecs = { version = "0.10", features = ["column-serialize"] }
@@ -12,17 +13,17 @@ tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
 tokio-macros = { version = "0.2.0-alpha.6" }
 anyhow = "1"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1"
 slab = "0.4"
 lazy_static = "1"
 seahash = "4"
 noise-functions = "0.2"
-indexmap = "2"
+indexmap = { version = "2", features = ["serde"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 rayon = "1"
 bincode = { version = "2.0.0-rc.3", features = ["serde"] }
-smallvec = "1"
+smallvec = { version = "1", features = ["serde"] }
 argh = "0.1"
 ndarray-conv = "0.6.0"
 ndarray = "0.17.2"

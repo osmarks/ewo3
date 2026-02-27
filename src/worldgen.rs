@@ -498,7 +498,7 @@ pub fn generate_world() -> GeneratedWorld {
 
     let (water, salt) = simulate_water(&mut heightmap, &rain, &sea, &sinks);
 
-    let contours = generate_contours(&heightmap, 0.15);
+    let contours = generate_contours(&heightmap, 0.1);
 
     for (point, _, _, _) in contours {
         terrain[point] = TerrainType::Contour;
