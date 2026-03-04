@@ -7,11 +7,9 @@ use image::{ImageBuffer, Rgb};
 use std::collections::HashMap;
 use std::time::Instant;
 
-mod worldgen;
-mod map;
-
-use map::*;
-use worldgen::*;
+use ewo3::map::*;
+use ewo3::render::{hex_to_image_coords, normalize};
+use ewo3::worldgen::*;
 
 #[derive(FromArgs)]
 /// Render worldgen debug fields to a PNG.
@@ -234,18 +232,17 @@ fn main() -> Result<()> {
     println!("ranges: {:?}, {:?}, {:?}", r1, r2, r3);
 
     for (position, _) in heightmap.iter() {
-        let col = position.x + (position.y - (position.y & 1)) / 2 + image_radius;
-        let row = position.y + image_radius;
+        let (col, row) = hex_to_image_coords(position, image_radius);
         let mut c1 = sample_field(f1, position, &render_data);
         let mut c2 = sample_field(f2, position, &render_data);
         let mut c3 = sample_field(f3, position, &render_data);
         if args.normalize {
-            c1 = ((c1 - r1.0) / (r1.1 - r1.0)).clamp(0.0, 1.0);
-            c2 = ((c2 - r2.0) / (r2.1 - r2.0)).clamp(0.0, 1.0);
-            c3 = ((c3 - r3.0) / (r3.1 - r3.0)).clamp(0.0, 1.0);
+            c1 = normalize(c1, r1.0, r1.1);
+            c2 = normalize(c2, r2.0, r2.1);
+            c3 = normalize(c3, r3.0, r3.1);
         }
         let rgb = to_rgb(c1, c2, c3, &args.color_space);
-        image.put_pixel(col as u32, row as u32, Rgb::from(rgb));
+        image.put_pixel(col, row, Rgb::from(rgb));
     }
     println!("render: {:.3}s", t.elapsed().as_secs_f32());
 

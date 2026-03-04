@@ -470,7 +470,7 @@ pub fn simulate_air(heightmap: &Map<f32>, sea: &HashSet<Coord>, scan_dir: CoordV
     (rain_map, temperature_map, atmo_humidity)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub enum TerrainType {
     Empty,
     Contour,

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use crate::worldgen::TerrainType;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CropType {
@@ -48,28 +49,40 @@ impl Genome {
         sigmoid(self.reproductive_size_fraction_param) * 0.49 + 0.5
     }
 
-    pub fn base_growth_rate(&self, nutrients: f32, water: f32, temperature: f32, salt: f32) -> f32 {
-        let water_diff = (water - self.optimal_water_level).abs();
-        let temperature_diff = (temperature - self.optimal_temperature).abs();
+    pub fn terrain_valid(&self, terrain: &TerrainType) -> bool {
+        match terrain {
+            TerrainType::Empty => true,
+            _ => false
+        }
+    }
+
+    pub fn base_growth_rate(&self, nutrients: f32, water: f32, temperature: f32, salt: f32, terrain: &TerrainType) -> f32 {
+        if !self.terrain_valid(terrain) {
+            return 0.0;
+        }
+        let water_diff = (water - sigmoid(self.optimal_water_level)).abs();
+        let temperature_diff = (temperature - sigmoid(self.optimal_temperature)).abs();
         let salt_excess = (salt - sigmoid(self.salt_tolerance)).max(0.0);
+        let water_tolerance = 0.5 * sigmoid(self.water_tolerance * 3.0 - 1.0);
+        let temperature_tolerance = 0.5 * sigmoid(self.temperature_tolerance * 3.0 - 1.0);
         let base = 1.0
             - self.reproduction_rate * 0.1 // faster reproduction trades off slightly against growth
             - self.nutrient_addition_rate() * 0.16 // nutrient enrichment has a growth tradeoff
-            - (water_diff - sigmoid(self.water_tolerance)).max(0.0) // penalize plants when far from optimal environmental range
-            - (temperature_diff - sigmoid(self.temperature_tolerance)).max(0.0) // same for temperature
+            - 1.8 * (water_diff - water_tolerance).max(0.0) // penalize plants when far from optimal environmental range
+            - (temperature_diff - temperature_tolerance).max(0.0) // same for temperature
             - salt_excess * 1.5
             - self.water_tolerance * 0.2
             - self.temperature_tolerance * 0.2
             - self.salt_tolerance * 0.15;
-        (base * (-nutrients.min(0.0)).exp()).max(0.0)
+        base * (2.0 * nutrients - 2.0).min(0.0).exp()
     }
 
     pub fn max_size(&self) -> f32 {
         self.max_size.min(0.0).exp().max(self.max_size + 1.0) + 0.5
     }
 
-    pub fn effective_growth_rate(&self, nutrients: f32, water: f32, temperature: f32, salt: f32) -> f32 {
-        1.5f32.powf(self.growth_rate) * 0.5 * self.base_growth_rate(nutrients, water, temperature, salt)
+    pub fn effective_growth_rate(&self, nutrients: f32, water: f32, temperature: f32, salt: f32, terrain: &TerrainType) -> f32 {
+        1.5f32.powf(self.growth_rate) * 0.5 * self.base_growth_rate(nutrients, water, temperature, salt, terrain)
     }
 
     pub fn nutrient_addition_rate(&self) -> f32 {

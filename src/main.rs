@@ -3,23 +3,21 @@ extern crate test;
 
 use hecs::{CommandBuffer, Entity, With, World};
 use futures_util::{stream::TryStreamExt, SinkExt, StreamExt};
-use indexmap::IndexMap;
-use smallvec::{smallvec, SmallVec};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio::sync::{mpsc, Mutex};
 use anyhow::{Result, Context, anyhow};
 use argh::FromArgs;
-use std::{convert::TryFrom, hash::{Hash, Hasher}, net::SocketAddr, ops::DerefMut, sync::Arc, time::Duration};
+use std::{hash::{Hash, Hasher}, net::SocketAddr, ops::DerefMut, sync::Arc, time::Duration};
 use slab::Slab;
 use serde::{Serialize, Deserialize};
 
-pub mod worldgen;
-pub mod map;
-pub mod plant;
-pub mod world_serde;
-
-use map::*;
+use ewo3::components::*;
+use ewo3::map::*;
+use ewo3::plant;
+use ewo3::save::SavedGame;
+use ewo3::world_serde;
+use ewo3::worldgen;
 
 #[derive(FromArgs)]
 /// Run the game server.
@@ -138,276 +136,6 @@ impl GameState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-enum Item {
-    Dirt,
-    Bone
-}
-
-impl Item {
-    fn name(&self) -> &'static str {
-        use Item::*;
-        match self {
-            Dirt => "Dirt",
-            Bone => "Bone"
-        }
-    }
-
-    fn description(&self) -> &'static str {
-        use Item::*;
-        match self {
-            Dirt => "It's from the ground. You're carrying it for some reason.",
-            Bone => "Disassembling your enemies for resources is probably ethical."
-        }
-    }
-}
-
-struct PositionIndex {
-    particles: Map<Option<Entity>>,
-    entities: Map<Option<Entity>>,
-    terrain: Map<Option<Entity>>
-}
-
-impl PositionIndex {
-    fn new(radius: i32) -> Self {
-        Self {
-            particles: Map::new(radius, None),
-            entities: Map::new(radius, None),
-            terrain: Map::new(radius, None)
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PlayerCharacter;
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
-enum MapLayer {
-    Particles,
-    Entities,
-    Terrain
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-struct Position {
-    layer: MapLayer,
-    coords: SmallVec<[Coord; 2]>,
-    move_count: u64
-}
-
-impl Position {
-    fn head(&self) -> Coord {
-        self.coords[0]
-    }
-
-    fn single_tile(c: Coord, layer: MapLayer) -> Self {
-        Self {
-            layer,
-            coords: smallvec![c],
-            move_count: 0
-        }
-    }
-
-    fn iter_coords(&self) -> impl Iterator<Item=Coord> + '_ {
-        self.coords.iter().copied()
-    }
-
-    fn record_for(&mut self, index: &mut PositionIndex, entity: Option<Entity>) {
-        let target_layer = match self.layer {
-            MapLayer::Particles => &mut index.particles,
-            MapLayer::Entities => &mut index.entities,
-            MapLayer::Terrain => &mut index.terrain,
-        };
-        for coord in self.coords.iter() {
-            target_layer[*coord] = entity;
-        }
-    }
-
-    // return value is whether it is now dead/positionless
-    fn remove_coord(&mut self, coord: Coord, index: &mut PositionIndex, entity: Entity) -> bool {
-        self.record_for(index, None);
-        self.coords.retain(|x| *x != coord);
-        self.record_for(index, Some(entity));
-        self.coords.len() > 0
-    }
-
-    fn move_into(&mut self, coord: Coord, index: &mut PositionIndex, entity: Entity) -> Coord {
-        self.record_for(index, None);
-        let fst = self.coords.remove(0);
-        self.coords.push(coord);
-        self.record_for(index, Some(entity));
-        self.move_count += 1;
-        fst
-    }
-}
-
-// TODO: Maybe move off ECS
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-struct MovingInto(Coord);
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Health { current: f32, max: f32, damage_taken: f32, healing_taken: f32 }
-
-impl Health {
-    fn pct(&self) -> f32 {
-        if self.max == 0.0 { 0.0 }
-        else { self.current / self.max }
-    }
-
-    fn new(current: f32, max: f32) -> Self {
-        Health { current, max, damage_taken: 0.0, healing_taken: 0.0 }
-    }
-
-    fn apply(&mut self, delta: f32) {
-        let original = self.current;
-        self.current = (self.current + delta).min(self.max);
-        if delta < 0.0 {
-            self.damage_taken += original - self.current;
-        } else {
-            self.healing_taken += self.current - original;
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ShrinkOnDeath;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Render(char);
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Attack { damage: StochasticNumber, energy: f32, hits: u64, kills: u64 }
-
-// TODO: would be nice to track kills on RangedAttacks
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RangedAttack { damage: StochasticNumber, energy: f32, range: u64, firings: u64 }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct DespawnOnTick(u64);
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct DespawnRandomly(u64);
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct EnemyTarget { spawn_range: std::ops::RangeInclusive<i32>, spawn_density: f32, spawn_rate_inv: usize, aggression_range: i32, spawn_count: u64 }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Enemy;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct MoveCost(StochasticNumber);
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Velocity(CoordVec);
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Obstruction { entry_multiplier: f32, exit_multiplier: f32, obstruction_count: u64 }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Energy { current: f32, regeneration_rate: f32, burst: f32, total_used: f32 }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Drops(Vec<(Item, StochasticNumber)>);
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Jump(i32);
-
-impl Energy {
-    fn try_consume(&mut self, cost: f32) -> bool {
-        if self.current >= -1e-12 { // numerics
-            self.current -= cost;
-            self.total_used += cost;
-            true
-        } else {
-            false
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct DespawnOnImpact;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Inventory { contents: indexmap::IndexMap<Item, u64>, added_items: u64, additions: u64, taken_items: u64, takings: u64 }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Plant {
-    genome: plant::Genome,
-    current_size: f32,
-    nutrients_consumed: f32,
-    nutrients_added: f32,
-    water_consumed: f32,
-    growth_ticks: u64,
-    children: u64,
-    ready_for_reproduce_ticks: u64
-}
-
-impl Plant {
-    fn new(genome: plant::Genome) -> Self {
-        Plant {
-            genome,
-            current_size: 0.1,
-            nutrients_consumed: 0.0,
-            nutrients_added: 0.0,
-            water_consumed: 0.0,
-            growth_ticks: 0,
-            children: 0,
-            ready_for_reproduce_ticks: 0
-        }
-    }
-
-    fn can_reproduce(&self) -> bool {
-        self.current_size >= self.genome.max_size() * self.genome.reproductive_size_fraction()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct NewlyAdded; // ugly hack to work around ECS deficiencies (change tracker incompleteness); TODO maybe move off ECS for this
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CreatedAt(u64);
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct BlocksEnemySpawn(u64);
-
-impl Inventory {
-    fn add(&mut self, item: Item, qty: u64) {
-        *self.contents.entry(item).or_default() += qty;
-        self.added_items += qty;
-        self.additions += 1;
-    }
-
-    fn take(&mut self, item: Item, qty: u64) -> bool {
-        match self.contents.entry(item) {
-            indexmap::map::Entry::Occupied(mut o) => {
-                let current = o.get_mut();
-                if *current >= qty {
-                    *current -= qty;
-                    self.taken_items += qty;
-                    self.takings += 1;
-                    return true;
-                }
-                return false;
-            },
-            indexmap::map::Entry::Vacant(_) => return false
-        }
-    }
-
-    fn extend(&mut self, other: &Inventory) {
-        for (item, count) in other.contents.iter() {
-            self.add(item.clone(), *count);
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        !self.contents.iter().any(|(_, c)| *c > 0)
-    }
-
-    fn empty() -> Self {
-        Self { contents: IndexMap::new(), added_items: 0, additions: 0, taken_items: 0, takings: 0 }
-    }
-}
-
 const VIEW: i32 = 15;
 const RANDOM_DESPAWN_INV_RATE: u64 = 4000;
 
@@ -456,22 +184,6 @@ fn consume_energy_if_available<R: DerefMut<Target=Energy>>(e: &mut Option<R>, co
     e.is_none() || e.as_mut().unwrap().try_consume(cost)
 }
 
-fn triangle_distribution(min: f32, max: f32, mode: f32, rng: &mut fastrand::Rng) -> f32 {
-    let sample = rng.f32();
-    let threshold = (mode - min) / (max - min);
-    if sample < threshold {
-        min + (sample * (max - min) * (mode - min)).sqrt()
-    } else {
-        max - ((1.0 - sample) * (max - min) * (max - mode)).sqrt()
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-enum StochasticNumber {
-    Constant(f32),
-    Triangle { min: f32, max: f32, mode: f32 }
-}
-
 fn rebuild_position_index(world: &World, radius: i32) -> PositionIndex {
     let mut index = PositionIndex::new(radius);
     for (entity, position) in world.query::<(Entity, &mut Position)>().iter() {
@@ -480,76 +192,47 @@ fn rebuild_position_index(world: &World, radius: i32) -> PositionIndex {
     index
 }
 
-#[derive(Serialize, Deserialize)]
-struct SavedGame {
-    ticks: u64,
-    rng_seed: u64,
-    map: worldgen::GeneratedWorld,
-    dynamic_soil_nutrients: Map<f32>,
-    dynamic_groundwater: Map<f32>,
-    world: Vec<u8>,
+fn saved_game_from_state(state: &GameState) -> Result<SavedGame> {
+    Ok(SavedGame {
+        ticks: state.ticks,
+        rng_seed: state.rng.get_seed(),
+        map: state.map.clone(),
+        dynamic_soil_nutrients: state.dynamic_soil_nutrients.clone(),
+        dynamic_groundwater: state.dynamic_groundwater.clone(),
+        world: world_serde::serialize_world_to_bytes(&state.world)?,
+    })
 }
 
-impl SavedGame {
-    fn from_state(state: &GameState) -> Result<Self> {
-        Ok(Self {
-            ticks: state.ticks,
-            rng_seed: state.rng.get_seed(),
-            map: state.map.clone(),
-            dynamic_soil_nutrients: state.dynamic_soil_nutrients.clone(),
-            dynamic_groundwater: state.dynamic_groundwater.clone(),
-            world: world_serde::serialize_world_to_bytes(&state.world)?,
-        })
-    }
-
-    fn into_state(self) -> Result<GameState> {
-        let world = world_serde::deserialize_world_from_bytes(&self.world)?;
-        let positions = rebuild_position_index(&world, self.map.radius);
-        let baseline_soil_nutrients = self.map.soil_nutrients.clone();
-        let baseline_groundwater = self.map.groundwater.clone();
-        let baseline_salt = self.map.salt.clone();
-        let baseline_temperature = self.map.temperature.clone();
-        Ok(GameState {
-            world,
-            clients: Slab::new(),
-            ticks: self.ticks,
-            rng: fastrand::Rng::with_seed(self.rng_seed),
-            map: self.map,
-            baseline_soil_nutrients,
-            baseline_groundwater,
-            baseline_salt,
-            baseline_temperature,
-            dynamic_soil_nutrients: self.dynamic_soil_nutrients,
-            dynamic_groundwater: self.dynamic_groundwater,
-            positions,
-            metrics: GameMetrics::new()
-        })
-    }
-}
-
-impl StochasticNumber {
-    fn sample(&self, rng: &mut fastrand::Rng) -> f32 {
-        match self {
-            StochasticNumber::Constant(x) => *x,
-            StochasticNumber::Triangle { min, max, mode } => triangle_distribution(*min, *max, *mode, rng)
-        }
-    }
-
-    fn sample_rounded<T: TryFrom<i128>>(&self, rng: &mut fastrand::Rng) -> T {
-        T::try_from(self.sample(rng).round() as i128).map_err(|_| "convert fail").unwrap()
-    }
-
-    fn triangle_from_min_range(min: f32, range: f32) -> Self {
-        StochasticNumber::Triangle { min: min, max: min + range, mode: (min + range) / 2.0 }
-    }
+fn game_state_from_saved(saved: SavedGame) -> Result<GameState> {
+    let world = world_serde::deserialize_world_from_bytes(&saved.world)?;
+    let positions = rebuild_position_index(&world, saved.map.radius);
+    let baseline_soil_nutrients = saved.map.soil_nutrients.clone();
+    let baseline_groundwater = saved.map.groundwater.clone();
+    let baseline_salt = saved.map.salt.clone();
+    let baseline_temperature = saved.map.temperature.clone();
+    Ok(GameState {
+        world,
+        clients: Slab::new(),
+        ticks: saved.ticks,
+        rng: fastrand::Rng::with_seed(saved.rng_seed),
+        map: saved.map,
+        baseline_soil_nutrients,
+        baseline_groundwater,
+        baseline_salt,
+        baseline_temperature,
+        dynamic_soil_nutrients: saved.dynamic_soil_nutrients,
+        dynamic_groundwater: saved.dynamic_groundwater,
+        positions,
+        metrics: GameMetrics::new(),
+    })
 }
 
 const PLANT_TICK_DELAY: u64 = 128;
 const FIELD_DECAY_DELAY: u64 = 100;
 const PLANT_GROWTH_SCALE: f32 = 0.01;
-const SOIL_NUTRIENT_CONSUMPTION_RATE: f32 = 0.04;
+const SOIL_NUTRIENT_CONSUMPTION_RATE: f32 = 0.04 * 10.0;
 const SOIL_NUTRIENT_FIXATION_RATE: f32 = 0.0002;
-const WATER_CONSUMPTION_RATE: f32 = 0.02;
+const WATER_CONSUMPTION_RATE: f32 = 0.02 * 10.0;
 const PLANT_IDLE_WATER_CONSUMPTION_OFFSET: f32 = 0.05;
 const PLANT_DIEOFF_THRESHOLD: f32 = 0.3;
 const PLANT_DIEOFF_RATE: f32 = 0.2;
@@ -692,8 +375,9 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
             let soil_nutrients = state.actual_soil_nutrients(pos);
             let salt = state.baseline_salt[pos];
             let temperature = state.baseline_temperature[pos];
+            let terrain = &state.map.get_terrain(pos);
             //println!("{:?} {} {} {} {} {}", plant.genome, water, soil_nutrients, salt, temperature, base_growth_rate);
-            if plant.genome.base_growth_rate(soil_nutrients, water, temperature, salt) < PLANT_DIEOFF_THRESHOLD {
+            if plant.genome.base_growth_rate(soil_nutrients, water, temperature, salt, terrain) < PLANT_DIEOFF_THRESHOLD {
                 if let Ok(mut health) = state.world.get::<&mut Health>(entity) {
                     health.apply(-PLANT_DIEOFF_RATE);
                     if health.current <= 0.0 {
@@ -701,12 +385,13 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                         // also, it might break the position tracker
                         kill(&mut buffer, &mut despawn_buffer, &state, &mut rng, entity, None);
                         state.metrics.plants_died += 1;
+                        // TODO: death should provide decomposition nutrients to soil
                     }
                 }
             }
 
             let original_size = plant.current_size;
-            plant.current_size += plant.genome.effective_growth_rate(soil_nutrients, water, temperature, salt) * PLANT_GROWTH_SCALE * plant.current_size.powf(-0.25); // allometric scaling law
+            plant.current_size += plant.genome.effective_growth_rate(soil_nutrients, water, temperature, salt, terrain) * PLANT_GROWTH_SCALE * plant.current_size.powf(-0.25); // allometric scaling law
             plant.current_size = plant.current_size.min(plant.genome.max_size());
             let difference = (plant.current_size - original_size).max(0.0);
 
@@ -729,7 +414,7 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
             state.dynamic_groundwater[pos] -= water_consumed;
             plant.water_consumed += water_consumed;
 
-            println!("water={} nutrient={} diff={} consume={}", water, soil_nutrients, difference, water_consumed);
+            //println!("water={} nutrient={} diff={} consume={}", water, soil_nutrients, difference, water_consumed);
 
             if difference > 0.0 {
                 plant.growth_ticks += 1;
@@ -776,7 +461,8 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
 
             for _ in 0..count_hexes(PLANT_SEEDING_RADIUS) {
                 let newpos = pos + sample_range_rng(PLANT_SEEDING_RADIUS, &mut rng);
-                if !state.map.heightmap.in_range(newpos) || state.positions.entities[newpos].is_some() {
+                // TODO: maybe just discard seed here
+                if !state.map.heightmap.in_range(newpos) || state.positions.entities[newpos].is_some() || !hybrid_genome.terrain_valid(&state.map.get_terrain(newpos)) {
                     continue;
                 }
                 buffer.spawn((
@@ -1153,16 +839,14 @@ async fn load_world() -> Result<worldgen::GeneratedWorld> {
 
 async fn load_saved_game() -> Result<Option<SavedGame>> {
     match tokio::fs::read(SAVE_FILE).await {
-        Ok(data) => Ok(Some(
-            bincode::serde::decode_from_slice(&data, bincode::config::standard())?.0,
-        )),
+        Ok(data) => Ok(Some(SavedGame::decode(&data)?)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),
     }
 }
 
 async fn save_game(state: &GameState) -> Result<()> {
-    let encoded = bincode::serde::encode_to_vec(SavedGame::from_state(state)?, bincode::config::standard())?;
+    let encoded = saved_game_from_state(state)?.encode()?;
     tokio::fs::write(SAVE_FILE, encoded).await?;
     Ok(())
 }
@@ -1178,7 +862,7 @@ async fn main() -> Result<()> {
     let state = if let Some(saved) = load_saved_game().await? {
         println!("Loaded game state from {}", SAVE_FILE);
         loaded_save = true;
-        Arc::new(Mutex::new(saved.into_state()?))
+        Arc::new(Mutex::new(game_state_from_saved(saved)?))
     } else {
         let world = match load_world().await {
             Ok(world) => world,
@@ -1220,7 +904,7 @@ async fn main() -> Result<()> {
         while batch.len() < INITIAL_PLANTS {
             let genome = plant::Genome::random();
             let pos = Coord::origin() + sample_range(state.map.radius());
-            if genome.base_growth_rate(state.actual_soil_nutrients(pos), state.actual_groundwater(pos), state.baseline_temperature[pos], state.baseline_salt[pos]) > 0.2 {
+            if genome.base_growth_rate(state.actual_soil_nutrients(pos), state.actual_groundwater(pos), state.baseline_temperature[pos], state.baseline_salt[pos], &state.map.get_terrain(pos)) > 0.2 {
                 batch.push((
                     Position::single_tile(pos, MapLayer::Entities),
                     Render('+'),
