@@ -247,6 +247,7 @@ pub fn get_sea(heightmap: &Map<f32>) -> (HashSet<Coord>, HashSet<Coord>) {
 
 const SALT_REMOVAL: f32 = 0.13;
 const SALT_RANGE: f32 = 0.33;
+const RIVER_UNSALT_RANGE_VS_EROSION: f32 = 3.0;
 
 pub fn simulate_water(heightmap: &mut Map<f32>, rain_map: &Map<f32>, sea: &HashSet<Coord>, sinks: &HashSet<Coord>) -> (Map<f32>, Map<f32>) {
     let mut watermap = Map::<f32>::new(heightmap.radius, 0.0);
@@ -323,6 +324,7 @@ pub fn simulate_water(heightmap: &mut Map<f32>, rain_map: &Map<f32>, sea: &HashS
             }
 
             let erosion_range_raw = (water_range_raw * 2.0 + 2.0).powf(EROSION_EXPONENT);
+            let unsalt_range = (erosion_range_raw * RIVER_UNSALT_RANGE_VS_EROSION).ceil() as i32;
             let erosion_range = erosion_range_raw.ceil() as i32;
             for (this_range, nearby) in hex_range(erosion_range) {
                 if !watermap.in_range(point + nearby) {
@@ -333,6 +335,7 @@ pub fn simulate_water(heightmap: &mut Map<f32>, rain_map: &Map<f32>, sea: &HashS
                     let water_rate = watermap[point] / (this_range as f32) / erosion_range_raw.max(1.0).powf(EROSION_EXPONENT);
                     heightmap[point + nearby] -= EROSION * water_rate;
                     heightmap[point + nearby] = heightmap[point + nearby].max(SEA_LEVEL);
+                    // TODO there's too much salt near rivers, but it's hard to fix this with the current design
                     salt[point + nearby] -= SALT_REMOVAL * water_rate; // freshwater rivers reduce salt nearby
                     salt[point + nearby] = salt[point + nearby].max(0.0);
                 }

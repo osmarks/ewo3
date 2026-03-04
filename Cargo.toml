@@ -5,7 +5,7 @@ edition = "2021"
 default-run = "ewo3"
 
 [dependencies]
-hecs = { version = "0.10", features = ["column-serialize"] }
+hecs = { version = "0.11", features = ["column-serialize"] }
 euclid = { version = "0.22", features = ["serde"] }
 fastrand = "2"
 tokio-tungstenite = "0.23"

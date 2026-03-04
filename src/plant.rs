@@ -23,7 +23,8 @@ pub struct Genome {
     temperature_tolerance: f32,
     water_tolerance: f32,
     salt_tolerance: f32,
-    pub max_size: f32
+    max_size: f32
+    // TODO number of seeds produced?
     // TODO color trait
 }
 
@@ -44,27 +45,39 @@ fn normal_scaled(mu: f32, sigma: f32) -> f32 {
 
 impl Genome {
     pub fn reproductive_size_fraction(&self) -> f32 {
-        sigmoid(self.reproductive_size_fraction_param)
+        sigmoid(self.reproductive_size_fraction_param) * 0.49 + 0.5
     }
 
-    pub fn effective_growth_rate(&self, nutrients: f32, water: f32, temperature: f32, salt: f32) -> f32 {
+    pub fn base_growth_rate(&self, nutrients: f32, water: f32, temperature: f32, salt: f32) -> f32 {
         let water_diff = (water - self.optimal_water_level).abs();
         let temperature_diff = (temperature - self.optimal_temperature).abs();
         let salt_excess = (salt - sigmoid(self.salt_tolerance)).max(0.0);
-        let base = 1.5f32.powf(self.growth_rate)
+        let base = 1.0
             - self.reproduction_rate * 0.1 // faster reproduction trades off slightly against growth
-            - self.nutrient_addition_rate.max(0.0) * 0.16 // nutrient enrichment has a growth tradeoff
+            - self.nutrient_addition_rate() * 0.16 // nutrient enrichment has a growth tradeoff
             - (water_diff - sigmoid(self.water_tolerance)).max(0.0) // penalize plants when far from optimal environmental range
             - (temperature_diff - sigmoid(self.temperature_tolerance)).max(0.0) // same for temperature
-            - salt_excess
+            - salt_excess * 1.5
             - self.water_tolerance * 0.2
             - self.temperature_tolerance * 0.2
             - self.salt_tolerance * 0.2;
         (base * (-nutrients.min(0.0)).exp()).max(0.0)
     }
 
+    pub fn max_size(&self) -> f32 {
+        self.max_size.min(0.0).exp().max(self.max_size + 1.0) + 0.5
+    }
+
+    pub fn effective_growth_rate(&self, nutrients: f32, water: f32, temperature: f32, salt: f32) -> f32 {
+        1.5f32.powf(self.growth_rate) * 0.5 * self.base_growth_rate(nutrients, water, temperature, salt)
+    }
+
     pub fn nutrient_addition_rate(&self) -> f32 {
         self.nutrient_addition_rate.max(0.0)
+    }
+
+    pub fn reproduction_rate(&self) -> f32 {
+        sigmoid(self.reproduction_rate)
     }
 
     pub fn random() -> Genome {
@@ -77,10 +90,10 @@ impl Genome {
         };
 
         let (nutrient_addition_rate, optimal_water_level, optimal_temperature, reproductive_size_fraction_param, salt_tolerance, max_size) = match crop_type {
-            CropType::Grass => (-10.0, 0.0, 0.0, -1.0, 0.2, 0.0),
-            CropType::EucalyptusTree => (-10.0, 2.0, 1.0, 1.0, 1.3, 5.0),
-            CropType::BushTomato => (-10.0, -1.0, 1.5, -0.3, 1.6, 1.0),
-            CropType::GoldenWattleTree => (2.0, 1.5, 1.0, 0.5, 0.9, 3.0),
+            CropType::Grass =>            (-10.0, 0.0, 0.0, -1.0, 0.0, 1.0),
+            CropType::EucalyptusTree =>   (-10.0, 1.0, 0.7,  1.0, 0.1, 5.0),
+            CropType::BushTomato =>       (-10.0, 0.0, 1.0, -0.3, 0.2, 1.5),
+            CropType::GoldenWattleTree => (  2.0, 0.5, 0.7,  0.5, 0.4, 3.0),
 
         };
 
