@@ -218,7 +218,7 @@ pub fn smooth(map: &Map<f32>, radius: i32) -> Map<f32> {
 
     // TODO: this is still really slow!
     //let result = if radius < 3 {
-    let result = ConvExt::conv_par(&data, &kernel, ConvMode::Same, PaddingMode::Replicate).unwrap();
+    let result = ConvExt::conv(&data, &kernel, ConvMode::Same, PaddingMode::Replicate).unwrap();
     //} else {
     //    ConvFFTExt::conv_fft(&data, &kernel, ConvMode::Same, PaddingMode::Replicate).unwrap()
     //};

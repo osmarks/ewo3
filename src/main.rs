@@ -9,6 +9,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio::sync::{mpsc, Mutex};
 use anyhow::{Result, Context, anyhow};
+use argh::FromArgs;
 use std::{convert::TryFrom, hash::{Hash, Hasher}, net::SocketAddr, ops::DerefMut, sync::Arc, time::Duration};
 use slab::Slab;
 use serde::{Serialize, Deserialize};
@@ -19,6 +20,17 @@ pub mod plant;
 pub mod world_serde;
 
 use map::*;
+
+#[derive(FromArgs)]
+/// Run the game server.
+struct Args {
+    /// websocket listen address
+    #[argh(option, default = "String::from(\"0.0.0.0:8011\")")]
+    listen_addr: String,
+    /// simulation tick interval in milliseconds
+    #[argh(option, default = "56")]
+    tick_interval_ms: u64,
+}
 
 async fn handle_connection(raw_stream: TcpStream, addr: SocketAddr, mut frames_rx: mpsc::Receiver<Frame>, inputs_tx: mpsc::Sender<Input>) -> Result<()> {
     let ws_stream = tokio_tungstenite::accept_async(raw_stream).await.context("websocket handshake failure")?;
@@ -87,6 +99,19 @@ struct Client {
     entity: Entity
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct GameMetrics {
+    plants_died: u64,
+    plants_reproduced: u64,
+    enemies_spawned: u64
+}
+
+impl GameMetrics {
+    fn new() -> Self {
+        GameMetrics { plants_died: 0, plants_reproduced: 0, enemies_spawned: 0 }
+    }
+}
+
 struct GameState {
     world: World,
     clients: Slab<Client>,
@@ -99,7 +124,8 @@ struct GameState {
     baseline_temperature: Map<f32>,
     dynamic_soil_nutrients: Map<f32>,
     dynamic_groundwater: Map<f32>,
-    positions: PositionIndex
+    positions: PositionIndex,
+    metrics: GameMetrics
 }
 
 impl GameState {
@@ -496,6 +522,7 @@ impl SavedGame {
             dynamic_soil_nutrients: self.dynamic_soil_nutrients,
             dynamic_groundwater: self.dynamic_groundwater,
             positions,
+            metrics: GameMetrics::new()
         })
     }
 }
@@ -524,7 +551,7 @@ const SOIL_NUTRIENT_CONSUMPTION_RATE: f32 = 0.04;
 const SOIL_NUTRIENT_FIXATION_RATE: f32 = 0.0002;
 const WATER_CONSUMPTION_RATE: f32 = 0.02;
 const PLANT_IDLE_WATER_CONSUMPTION_OFFSET: f32 = 0.05;
-const PLANT_DIEOFF_THRESHOLD: f32 = 0.01;
+const PLANT_DIEOFF_THRESHOLD: f32 = 0.3;
 const PLANT_DIEOFF_RATE: f32 = 0.2;
 const SAVE_FILE: &str = "save.bin";
 const AUTOSAVE_INTERVAL_TICKS: u64 = 1024;
@@ -648,6 +675,7 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                     ))
                 };
                 *spawn_count += 1;
+                state.metrics.enemies_spawned += 1;
             }
         }
     }
@@ -672,6 +700,7 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                         // TODO: this is inelegant and should be shared with the other death code
                         // also, it might break the position tracker
                         kill(&mut buffer, &mut despawn_buffer, &state, &mut rng, entity, None);
+                        state.metrics.plants_died += 1;
                     }
                 }
             }
@@ -699,6 +728,8 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
             let water_consumed = (difference + PLANT_IDLE_WATER_CONSUMPTION_OFFSET) * WATER_CONSUMPTION_RATE * plant.genome.water_efficiency();
             state.dynamic_groundwater[pos] -= water_consumed;
             plant.water_consumed += water_consumed;
+
+            println!("water={} nutrient={} diff={} consume={}", water, soil_nutrients, difference, water_consumed);
 
             if difference > 0.0 {
                 plant.growth_ticks += 1;
@@ -755,11 +786,11 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                     Plant::new(hybrid_genome.clone()),
                     NewlyAdded
                 ));
-                println!("plant reproduced {:?} {:?} {} {}.", plant.genome, other_plant.genome, plant.current_size, other_plant.current_size);
                 plant.children += 1;
                 other_plant.children += 1;
                 plant.current_size *= plant.genome.reproductive_size_fraction(); // TODO: explicit cooldown?
                 other_plant.current_size *= other_plant.genome.reproductive_size_fraction(); // TODO: vary this by plant component gender?
+                state.metrics.plants_reproduced += 1;
                 break;
             }
         }
@@ -1140,7 +1171,9 @@ const INITIAL_PLANTS: usize = 262144;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let addr = std::env::args().nth(1).unwrap_or_else(|| "0.0.0.0:8011".to_string());
+    let args: Args = argh::from_env();
+    let addr = args.listen_addr;
+    let tick_interval_ms = args.tick_interval_ms;
     let mut loaded_save = false;
     let state = if let Some(saved) = load_saved_game().await? {
         println!("Loaded game state from {}", SAVE_FILE);
@@ -1176,7 +1209,8 @@ async fn main() -> Result<()> {
             baseline_salt,
             baseline_temperature,
             dynamic_soil_nutrients,
-            dynamic_groundwater
+            dynamic_groundwater,
+            metrics: GameMetrics::new()
         }))
     };
 
@@ -1207,7 +1241,7 @@ async fn main() -> Result<()> {
     let state_ = state.clone();
     tokio::spawn(async move {
         let state = state_.clone();
-        let mut interval = tokio::time::interval(Duration::from_millis(56));
+        let mut interval = tokio::time::interval(Duration::from_millis(tick_interval_ms));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             let mut state = state.lock().await;
@@ -1222,6 +1256,7 @@ async fn main() -> Result<()> {
             }
             let tick_elapsed = time.elapsed();
             println!("Tick time: {:?}", tick_elapsed);
+            println!("{:?}", state.metrics);
             interval.tick().await;
         }
     });

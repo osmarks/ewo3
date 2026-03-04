@@ -60,7 +60,7 @@ impl Genome {
             - salt_excess * 1.5
             - self.water_tolerance * 0.2
             - self.temperature_tolerance * 0.2
-            - self.salt_tolerance * 0.2;
+            - self.salt_tolerance * 0.15;
         (base * (-nutrients.min(0.0)).exp()).max(0.0)
     }
 
