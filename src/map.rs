@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::ops::{Index, IndexMut};
 use std::marker::PhantomData;
 use ndarray::prelude::*;
-use ndarray_conv::{ConvExt, ConvFFTExt, ConvMode, PaddingMode};
+use ndarray_conv::{ConvFFTExt, ConvMode, PaddingMode};
 
 pub struct AxialWorldSpace;
 pub struct CubicWorldSpace;
@@ -218,7 +218,7 @@ pub fn smooth(map: &Map<f32>, radius: i32) -> Map<f32> {
 
     // TODO: this is still really slow!
     //let result = if radius < 3 {
-    let result = ConvExt::conv_par(&data, &kernel, ConvMode::Same, PaddingMode::Replicate).unwrap();
+    let result = data.conv_fft_par(&kernel, ConvMode::Same, PaddingMode::Replicate).unwrap();
     //} else {
     //    ConvFFTExt::conv_fft(&data, &kernel, ConvMode::Same, PaddingMode::Replicate).unwrap()
     //};
