@@ -60,21 +60,24 @@ impl Genome {
         if !self.terrain_valid(terrain) {
             return 0.0;
         }
-        let water_diff = (water - sigmoid(self.optimal_water_level)).abs();
-        let temperature_diff = (temperature - sigmoid(self.optimal_temperature)).abs();
-        let salt_excess = (salt - sigmoid(self.salt_tolerance)).max(0.0);
-        let water_tolerance = 0.5 * sigmoid(self.water_tolerance * 3.0 - 1.0);
-        let temperature_tolerance = 0.5 * sigmoid(self.temperature_tolerance * 3.0 - 1.0);
+        let water_diff = (water - sigmoid(self.optimal_water_level)).powf(2.0);
+        let temperature_diff = (temperature - sigmoid(self.optimal_temperature)).powf(2.0);
         let base = 1.0
             - self.reproduction_rate * 0.1 // faster reproduction trades off slightly against growth
             - self.nutrient_addition_rate() * 0.16 // nutrient enrichment has a growth tradeoff
-            - 1.8 * (water_diff - water_tolerance).max(0.0) // penalize plants when far from optimal environmental range
-            - (temperature_diff - temperature_tolerance).max(0.0) // same for temperature
-            - salt_excess * 1.5
-            - self.water_tolerance * 0.2
-            - self.temperature_tolerance * 0.2
+            - self.water_tolerance * 0.08
+            - self.temperature_tolerance * 0.07
             - self.salt_tolerance * 0.15;
-        base * (2.0 * nutrients - 2.0).min(0.0).exp()
+
+        let water_tolerance_coefficient = 15.0 * (1.0 + (-self.water_tolerance).exp());
+        let temperature_tolerance_coefficient = 12.0 * (1.0 + (-self.temperature_tolerance).exp());
+        let salt_tolerance_coefficient = 8.0 * (-self.salt_tolerance).exp();
+
+        base
+            * (2.0 * nutrients - 1.5).min(0.0).exp()
+            * (-water_tolerance_coefficient * water_diff).exp()
+            * (-temperature_tolerance_coefficient * temperature_diff).exp()
+            * (-salt.abs() * salt_tolerance_coefficient).exp()
     }
 
     pub fn max_size(&self) -> f32 {

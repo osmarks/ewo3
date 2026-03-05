@@ -324,7 +324,6 @@ pub fn simulate_water(heightmap: &mut Map<f32>, rain_map: &Map<f32>, sea: &HashS
             }
 
             let erosion_range_raw = (water_range_raw * 2.0 + 2.0).powf(EROSION_EXPONENT);
-            let unsalt_range = (erosion_range_raw * RIVER_UNSALT_RANGE_VS_EROSION).ceil() as i32;
             let erosion_range = erosion_range_raw.ceil() as i32;
             for (this_range, nearby) in hex_range(erosion_range) {
                 if !watermap.in_range(point + nearby) {

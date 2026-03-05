@@ -1,7 +1,10 @@
+use std::f32;
+
 use indexmap::IndexMap;
 use hecs::Entity;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
+use enum_map::{Enum, EnumMap};
 
 use crate::map::*;
 use crate::plant;
@@ -10,6 +13,14 @@ use crate::plant;
 pub enum Item {
     Dirt,
     Bone,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Enum, Copy)]
+pub enum HealthChangeType {
+    BluntForce,
+    Magic,
+    NaturalRegeneration,
+    Starvation
 }
 
 impl Item {
@@ -89,6 +100,19 @@ impl Position {
         }
     }
 
+    pub fn record_for_erase(&mut self, index: &mut PositionIndex, entity: Entity) {
+        let target_layer = match self.layer {
+            MapLayer::Particles => &mut index.particles,
+            MapLayer::Entities => &mut index.entities,
+            MapLayer::Terrain => &mut index.terrain,
+        };
+        for coord in self.coords.iter() {
+            if target_layer[*coord] == Some(entity) {
+                target_layer[*coord] = None;
+            }
+        }
+    }
+
     // Return value indicates whether any coordinate remains.
     pub fn remove_coord(&mut self, coord: Coord, index: &mut PositionIndex, entity: Entity) -> bool {
         self.record_for(index, None);
@@ -111,11 +135,35 @@ impl Position {
 pub struct MovingInto(pub Coord);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthChangeModifier {
+    fraction: f32,
+    offset: f32
+}
+
+impl HealthChangeModifier {
+    fn default() -> Self {
+        HealthChangeModifier { fraction: 1.0, offset: 0.0 }
+    }
+
+    fn invulnerable() -> Self {
+        HealthChangeModifier { fraction: 0.0, offset: 0.0 }
+    }
+
+    fn adjust(&self, delta: f32) -> f32 {
+        if delta > 0.0 {
+            (delta + self.offset).max(0.0) * self.fraction
+        } else {
+            (delta + self.offset).min(0.0) * self.fraction
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Health {
     pub current: f32,
     pub max: f32,
-    pub damage_taken: f32,
-    pub healing_taken: f32,
+    pub health_change_totals: EnumMap<HealthChangeType, f32>,
+    pub health_change_modifiers: EnumMap<HealthChangeType, HealthChangeModifier>
 }
 
 impl Health {
@@ -131,18 +179,25 @@ impl Health {
         Self {
             current,
             max,
-            damage_taken: 0.0,
-            healing_taken: 0.0,
+            health_change_modifiers: EnumMap::from_fn(|_| HealthChangeModifier::default()),
+            health_change_totals: EnumMap::from_fn(|_| 0.0)
         }
     }
 
-    pub fn apply(&mut self, delta: f32) {
+    pub fn apply(&mut self, ty: HealthChangeType, delta: f32) {
         let original = self.current;
-        self.current = (self.current + delta).min(self.max);
-        if delta < 0.0 {
-            self.damage_taken += original - self.current;
-        } else {
-            self.healing_taken += self.current - original;
+        let adjusted_delta = self.health_change_modifiers[ty].adjust(delta);
+        self.current = (self.current + adjusted_delta).min(self.max);
+        let real_change = self.current - original;
+        self.health_change_totals[ty] += real_change;
+    }
+
+    pub fn invulnerable() -> Self {
+        Self {
+            current: f32::MAX,
+            max: f32::MAX,
+            health_change_modifiers: EnumMap::from_fn(|_| HealthChangeModifier::invulnerable()),
+            health_change_totals: EnumMap::from_fn(|_| 0.0)
         }
     }
 }
@@ -161,7 +216,7 @@ pub enum StochasticNumber {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Attack {
-    pub damage: StochasticNumber,
+    pub damage: SmallVec<[(HealthChangeType, StochasticNumber); 1]>,
     pub energy: f32,
     pub hits: u64,
     pub kills: u64,
@@ -169,7 +224,7 @@ pub struct Attack {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RangedAttack {
-    pub damage: StochasticNumber,
+    pub damage: SmallVec<[(HealthChangeType, StochasticNumber); 1]>,
     pub energy: f32,
     pub range: u64,
     pub firings: u64,

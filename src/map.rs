@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::ops::{Index, IndexMut};
 use std::marker::PhantomData;
 use ndarray::prelude::*;
-use ndarray_conv::{ConvExt, ConvFFTExt, ConvMode, PaddingMode};
+use ndarray_conv::{ConvExt, ConvMode, PaddingMode};
 
 pub struct AxialWorldSpace;
 pub struct CubicWorldSpace;
