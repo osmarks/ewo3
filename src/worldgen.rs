@@ -247,7 +247,6 @@ pub fn get_sea(heightmap: &Map<f32>) -> (HashSet<Coord>, HashSet<Coord>) {
 
 const SALT_REMOVAL: f32 = 0.13;
 const SALT_RANGE: f32 = 0.33;
-const RIVER_UNSALT_RANGE_VS_EROSION: f32 = 3.0;
 
 pub fn simulate_water(heightmap: &mut Map<f32>, rain_map: &Map<f32>, sea: &HashSet<Coord>, sinks: &HashSet<Coord>) -> (Map<f32>, Map<f32>) {
     let mut watermap = Map::<f32>::new(heightmap.radius, 0.0);

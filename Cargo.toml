@@ -31,12 +31,8 @@ ndarray = "0.17.2"
 enum-map = { version = "2.7.3", features = ["serde"] }
 
 [[bin]]
-name = "worldgen"
-path = "src/worldgen_test.rs"
-
-[[bin]]
-name = "save_viewer"
-path = "src/save_viewer.rs"
+name = "render"
+path = "src/render.rs"
 
 [profile.release]
 debug = true
