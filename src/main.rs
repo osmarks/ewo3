@@ -292,7 +292,7 @@ fn game_state_from_saved(saved: SavedGame) -> Result<GameState> {
 const PLANT_TICK_DELAY: u64 = 128;
 const FIELD_DECAY_DELAY: u64 = 100;
 const PLANT_GROWTH_SCALE: f32 = 0.01;
-const SOIL_NUTRIENT_CONSUMPTION_RATE: f32 = 0.05;
+const SOIL_NUTRIENT_CONSUMPTION_RATE: f32 = 0.07;
 const SOIL_NUTRIENT_FIXATION_RATE: f32 = 0.0002;
 const WATER_CONSUMPTION_RATE: f32 = 0.03;
 const PLANT_IDLE_WATER_CONSUMPTION_OFFSET: f32 = 0.05;
@@ -316,7 +316,7 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
     buffer.apply(state);
 
     if state.ticks % FIELD_DECAY_DELAY == 0 {
-        state.dynamic_soil_nutrients.for_each_mut(|nutrients| *nutrients *= 0.999);
+        state.dynamic_soil_nutrients.for_each_mut(|nutrients| *nutrients *= 0.9999);
     } else if state.ticks % FIELD_DECAY_DELAY == 1 {
         state.dynamic_groundwater.for_each_mut(|water| *water *= 0.999);
     } else if state.ticks % FIELD_DECAY_DELAY == 2 {

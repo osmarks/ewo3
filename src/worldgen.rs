@@ -350,6 +350,7 @@ const NUTRIENT_NOISE_SCALE: f32 = 0.0015;
 
 // As a handwave, define soil nutrients to be partly randomized and partly based on water.
 // This kind of sort of makes sense because nitrogen is partly fixed by plants, which would have grown in water-having areas.
+// Update: they covaried way too much so reducing this.
 pub fn soil_nutrients(groundwater: &Map<f32>) -> Map<f32> {
     let mut soil_nutrients = Map::<f32>::from_fn(|d| {
         let c = to_cubic(d);
@@ -357,7 +358,7 @@ pub fn soil_nutrients(groundwater: &Map<f32>) -> Map<f32> {
             10.0 + c.x as f32 * NUTRIENT_NOISE_SCALE,
             c.y as f32 * NUTRIENT_NOISE_SCALE,
             c.z as f32 * NUTRIENT_NOISE_SCALE
-        ]) + groundwater[d]
+        ]) + groundwater[d] * 0.3
     }, groundwater.radius);
     percentilize(&mut soil_nutrients, |x| x.powf(0.4));
     soil_nutrients
@@ -465,7 +466,7 @@ pub fn simulate_air(heightmap: &Map<f32>, sea: &HashSet<Coord>, scan_dir: CoordV
     normalize(&mut rain_map, |x| x.powf(0.5));
     let rain_map = smooth(&rain_map, 3);
 
-    normalize(&mut temperature_map, |x| x);
+    percentilize(&mut temperature_map, |x| x); // TODO do this more cleanly
 
     (rain_map, temperature_map, atmo_humidity)
 }

@@ -67,10 +67,10 @@ impl Genome {
             - self.nutrient_addition_rate() * 0.16 // nutrient enrichment has a growth tradeoff
             - self.water_tolerance * 0.08
             - self.temperature_tolerance * 0.07
-            - self.salt_tolerance.max(0.0) * 0.15;
+            - self.salt_tolerance.max(0.0) * 0.05;
 
-        let water_tolerance_coefficient = 15.0 * (1.0 + (-self.water_tolerance).exp());
-        let temperature_tolerance_coefficient = 12.0 * (1.0 + (-self.temperature_tolerance).exp());
+        let water_tolerance_coefficient = 13.0 * (1.0 + (-self.water_tolerance).exp());
+        let temperature_tolerance_coefficient = 3.0 * (1.0 + (-self.temperature_tolerance).exp());
         let salt_tolerance_coefficient = 8.0 * (-self.salt_tolerance).exp();
 
         base
@@ -106,10 +106,10 @@ impl Genome {
         };
 
         let (nutrient_addition_rate, optimal_water_level, optimal_temperature, reproductive_size_fraction_param, salt_tolerance, max_size) = match crop_type {
-            CropType::Grass =>            (-10.0, 0.0, 0.0, -1.0, 0.0, 1.0),
-            CropType::EucalyptusTree =>   (-10.0, 1.0, 0.7,  1.0, 0.1, 5.0),
+            CropType::Grass =>            (-10.0,-1.0, 0.0, -1.0, 0.0, 1.0),
+            CropType::EucalyptusTree =>   (-10.0, 1.0, 0.5,  1.0, 0.1, 5.0),
             CropType::BushTomato =>       (-10.0, 0.0, 1.0, -0.3, 0.2, 1.5),
-            CropType::GoldenWattleTree => (  2.0, 0.5, 0.7,  0.5, 0.4, 3.0),
+            CropType::GoldenWattleTree => (  2.0, 0.5, 0.5,  0.5, 0.4, 3.0),
 
         };
 
