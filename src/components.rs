@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::f32;
 
 use indexmap::IndexMap;
@@ -9,10 +10,16 @@ use enum_map::{Enum, EnumMap};
 use crate::map::*;
 use crate::plant;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Item {
+// TODO: complicate this by making things nonfungible more
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
+pub enum FungibleItem {
     Dirt,
     Bone,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum NonFungibleItem {
+    Seed(plant::Genome)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Enum, Copy)]
@@ -23,18 +30,35 @@ pub enum HealthChangeType {
     Starvation
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Item {
+    Fungible(FungibleItem),
+    NonFungible(NonFungibleItem)
+}
+
+
 impl Item {
-    pub fn name(&self) -> &'static str {
+    pub fn name(&self) -> Cow<'static, str> {
+        use Item::*;
+        use NonFungibleItem::*;
+        use FungibleItem::*;
+
         match self {
-            Item::Dirt => "Dirt",
-            Item::Bone => "Bone",
+            Fungible(Dirt) => Cow::Borrowed("Dirt"),
+            Fungible(Bone) => Cow::Borrowed("Bone"),
+            NonFungible(Seed(genome)) => Cow::Owned(format!("Seed ({:?}", genome.crop_type))
         }
     }
 
     pub fn description(&self) -> &'static str {
+        use Item::*;
+        use NonFungibleItem::*;
+        use FungibleItem::*;
+
         match self {
-            Item::Dirt => "It's from the ground. You're carrying it for some reason.",
-            Item::Bone => "Disassembling your enemies for resources is probably ethical.",
+            Fungible(Dirt) => "It's from the ground. You're carrying it for some reason.",
+            Fungible(Bone) => "Disassembling your enemies for resources is probably ethical.",
+            NonFungible(Seed(_genome)) => "Grows into a plant, given appropriate conditions."
         }
     }
 }
@@ -292,7 +316,8 @@ pub struct DespawnOnImpact;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Inventory {
-    pub contents: IndexMap<Item, u64>,
+    pub fungible: IndexMap<FungibleItem, u64>,
+    pub non_fungible: Vec<NonFungibleItem>,
     pub added_items: u64,
     pub additions: u64,
     pub taken_items: u64,
@@ -301,17 +326,26 @@ pub struct Inventory {
 
 impl Inventory {
     pub fn add(&mut self, item: Item, qty: u64) {
-        *self.contents.entry(item).or_default() += qty;
+        match item {
+            Item::Fungible(x) => *self.fungible.entry(x).or_default() += qty,
+            Item::NonFungible(x) => for _ in 0..qty {
+                self.non_fungible.push(x.clone())
+            }
+        }
         self.added_items += qty;
         self.additions += 1;
     }
 
     pub fn extend(&mut self, other: &Inventory) {
-        for (item, count) in other.contents.iter() {
-            self.add(item.clone(), *count);
+        for (item, count) in other.fungible.iter() {
+            self.add(Item::Fungible(item.clone()), *count);
+        }
+        for item in other.non_fungible.iter() {
+            self.non_fungible.push(item.clone());
         }
     }
 
+    /*
     pub fn take(&mut self, item: Item, qty: u64) -> bool {
         match self.contents.entry(item) {
             indexmap::map::Entry::Occupied(mut o) => {
@@ -327,14 +361,16 @@ impl Inventory {
             indexmap::map::Entry::Vacant(_) => false,
         }
     }
+    */
 
     pub fn is_empty(&self) -> bool {
-        !self.contents.iter().any(|(_, c)| *c > 0)
+        !self.fungible.iter().any(|(_, c)| *c > 0) && self.non_fungible.is_empty()
     }
 
     pub fn empty() -> Self {
         Self {
-            contents: IndexMap::new(),
+            fungible: IndexMap::new(),
+            non_fungible: Vec::new(),
             added_items: 0,
             additions: 0,
             taken_items: 0,
@@ -353,6 +389,7 @@ pub struct Plant {
     pub growth_ticks: u64,
     pub children: u64,
     pub ready_for_reproduce_ticks: u64,
+    pub total_growth: f32 // currently a bit redundant, given nutrient consumption counter
 }
 
 impl Plant {
@@ -366,6 +403,7 @@ impl Plant {
             growth_ticks: 0,
             children: 0,
             ready_for_reproduce_ticks: 0,
+            total_growth: 0.0
         }
     }
 

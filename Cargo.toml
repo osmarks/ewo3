@@ -37,6 +37,7 @@ glutin = "0.31"
 glutin-winit = "0.4"
 raw-window-handle = "0.5"
 winit = "0.29"
+oklab = "1.1.2"
 
 [[bin]]
 name = "render"

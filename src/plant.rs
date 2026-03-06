@@ -11,7 +11,7 @@ pub enum CropType {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Genome {
-    crop_type: CropType,
+    pub crop_type: CropType,
     // polygenic traits; parameterized as N(0,1) (allegedly)
     // groundwater is [0,1] so this is sort of questionable
     // TODO: reparameterize or something
@@ -60,7 +60,10 @@ impl Genome {
         if !self.terrain_valid(terrain) {
             return 0.0;
         }
-        let water_diff = (water - sigmoid(self.optimal_water_level)).powf(2.0);
+        let mut water_diff = (water - sigmoid(self.optimal_water_level)).powf(2.0);
+        if water_diff >= 0.0 {
+            water_diff *= 0.5; // ugly hack for asymmetry
+        }
         let temperature_diff = (temperature - sigmoid(self.optimal_temperature)).powf(2.0);
         let base = 1.0
             - self.reproduction_rate * 0.1 // faster reproduction trades off slightly against growth
@@ -68,6 +71,7 @@ impl Genome {
             - self.water_tolerance * 0.08
             - self.temperature_tolerance * 0.07
             - self.salt_tolerance.max(0.0) * 0.05;
+        let base = base.max(0.0);
 
         let water_tolerance_coefficient = 13.0 * (1.0 + (-self.water_tolerance).exp());
         let temperature_tolerance_coefficient = 3.0 * (1.0 + (-self.temperature_tolerance).exp());
@@ -109,7 +113,7 @@ impl Genome {
             CropType::Grass =>            (-10.0,-1.0, 0.0, -1.0, 0.0, 1.0),
             CropType::EucalyptusTree =>   (-10.0, 1.0, 0.5,  1.0, 0.1, 5.0),
             CropType::BushTomato =>       (-10.0, 0.0, 1.0, -0.3, 0.2, 1.5),
-            CropType::GoldenWattleTree => (  2.0, 0.5, 0.5,  0.5, 0.4, 3.0),
+            CropType::GoldenWattleTree => (  2.0, 0.5, 0.5,  0.5, 0.7, 3.0),
 
         };
 

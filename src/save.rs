@@ -6,14 +6,15 @@ use crate::worldgen::GeneratedWorld;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GameMetrics {
-    pub plants_died: u64,
+    pub plants_died_old_age: u64,
+    pub plants_died_starvation: u64,
     pub plants_reproduced: u64,
     pub enemies_spawned: u64
 }
 
 impl GameMetrics {
     pub fn new() -> Self {
-        GameMetrics { plants_died: 0, plants_reproduced: 0, enemies_spawned: 0 }
+        GameMetrics { plants_died_old_age: 0, plants_died_starvation: 0, plants_reproduced: 0, enemies_spawned: 0 }
     }
 }
 

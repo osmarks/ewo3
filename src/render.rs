@@ -16,6 +16,7 @@ use glutin::surface::{GlSurface, Surface, SurfaceAttributesBuilder, WindowSurfac
 use imgui::Condition;
 use imgui_glow_renderer::{AutoRenderer as ImguiRenderer, TextureMap};
 use imgui_winit_support::winit::window::WindowBuilder;
+use ndarray::{Array1, Array2, Axis};
 use hecs::World;
 use image::{ImageBuffer, Rgb};
 use imgui_winit_support::{HiDpiMode, WinitPlatform};
@@ -222,38 +223,11 @@ fn field_range(field: Option<Field>, data: &RenderData) -> (f32, f32) {
 }
 
 fn to_rgb(c1: f32, c2: f32, c3: f32, color_space: ColorSpace) -> [u8; 3] {
-    fn linear_to_srgb(x: f32) -> f32 {
-        if x <= 0.0031308 {
-            12.92 * x
-        } else {
-            1.055 * x.powf(1.0 / 2.4) - 0.055
-        }
-    }
-
     let (r, g, b) = match color_space {
         ColorSpace::Rgb => (c1, c2, c3),
         ColorSpace::Oklab => {
-            let l = c1.clamp(0.0, 1.0);
-            let a = c2 * 2.0 - 1.0;
-            let b = c3 * 2.0 - 1.0;
-
-            let l_ = l + 0.3963377774 * a + 0.2158037573 * b;
-            let m_ = l - 0.1055613458 * a - 0.0638541728 * b;
-            let s_ = l - 0.0894841775 * a - 1.2914855480 * b;
-
-            let l3 = l_ * l_ * l_;
-            let m3 = m_ * m_ * m_;
-            let s3 = s_ * s_ * s_;
-
-            let r_lin = 4.0767416621 * l3 - 3.3077115913 * m3 + 0.2309699292 * s3;
-            let g_lin = -1.2684380046 * l3 + 2.6097574011 * m3 - 0.3413193965 * s3;
-            let b_lin = -0.0041960863 * l3 - 0.7034186147 * m3 + 1.7076147010 * s3;
-
-            (
-                linear_to_srgb(r_lin).clamp(0.0, 1.0),
-                linear_to_srgb(g_lin).clamp(0.0, 1.0),
-                linear_to_srgb(b_lin).clamp(0.0, 1.0),
-            )
+            let rgb = oklab::oklab_to_srgb_f32(oklab::Oklab { l: c1.clamp(0.0, 1.0), a: c2 * 1.0 - 0.5, b: c3 * 1.0 - 0.5 });
+            (rgb.r, rgb.g, rgb.b)
         }
     };
     [(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8]
@@ -401,63 +375,39 @@ fn load_render_data(args: &Args) -> Result<RenderData> {
     }
 }
 
-fn mat_vec_mul(mat: &[f32], n: usize, v: &[f32]) -> Vec<f32> {
-    let mut out = vec![0.0; n];
-    for i in 0..n {
-        let mut acc = 0.0;
-        for j in 0..n {
-            acc += mat[i * n + j] * v[j];
-        }
-        out[i] = acc;
-    }
-    out
-}
-
-fn vec_norm(v: &[f32]) -> f32 {
-    v.iter().map(|x| x * x).sum::<f32>().sqrt()
-}
-
-fn normalize_vec(v: &mut [f32]) {
-    let n = vec_norm(v);
+fn normalize_vec(v: &mut Array1<f32>) {
+    let n = v.dot(v).sqrt();
     if n > 1e-12 {
-        for x in v.iter_mut() {
-            *x /= n;
-        }
+        *v /= n;
     }
 }
 
-fn dot(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
-}
-
-fn top_pca_vectors(cov: &[f32], dim: usize, k: usize) -> Vec<Vec<f32>> {
-    let mut a = cov.to_vec();
+fn top_pca_vectors(mut a: Array2<f32>, k: usize) -> Vec<Array1<f32>> {
+    let dim = a.nrows();
     let mut out = Vec::new();
     let components = k.min(dim);
 
     for comp in 0..components {
-        let mut v = (0..dim)
-            .map(|i| 1.0 + (i + comp) as f32 * 0.013)
-            .collect::<Vec<_>>();
+        let mut v = Array1::from_iter((0..dim).map(|i| 1.0 + (i + comp) as f32 * 0.013));
         normalize_vec(&mut v);
 
         for _ in 0..64 {
-            let mut next = mat_vec_mul(&a, dim, &v);
+            let mut next = a.dot(&v);
             normalize_vec(&mut next);
             v = next;
         }
 
-        let av = mat_vec_mul(&a, dim, &v);
-        let lambda = dot(&v, &av);
+        let av = a.dot(&v);
+        let lambda = v.dot(&av);
         if !lambda.is_finite() || lambda.abs() < 1e-8 {
             break;
         }
 
-        for i in 0..dim {
-            for j in 0..dim {
-                a[i * dim + j] -= lambda * v[i] * v[j];
-            }
-        }
+        let outer = v
+            .view()
+            .insert_axis(Axis(1))
+            .dot(&v.view().insert_axis(Axis(0)));
+        a = &a - &(outer * lambda);
 
         out.push(v);
     }
@@ -474,51 +424,31 @@ fn render_pca(data: &RenderData, fields: &[Field], color_space: ColorSpace) -> R
     let n = coords.len();
     let m = fields.len();
 
-    let mut samples = vec![0.0f32; n * m];
+    let mut samples = Array2::<f32>::zeros((n, m));
     for (i, coord) in coords.iter().copied().enumerate() {
         for (j, field) in fields.iter().copied().enumerate() {
-            samples[i * m + j] = sample_field(field, coord, data);
-        }
-    }
-
-    let mut means = vec![0.0f32; m];
-    for j in 0..m {
-        let mut acc = 0.0;
-        for i in 0..n {
-            acc += samples[i * m + j];
-        }
-        means[j] = acc / n as f32;
-    }
-
-    let mut stds = vec![0.0f32; m];
-    for j in 0..m {
-        let mut acc = 0.0;
-        for i in 0..n {
-            let d = samples[i * m + j] - means[j];
-            acc += d * d;
-        }
-        stds[j] = (acc / (n as f32 - 1.0).max(1.0)).sqrt().max(1e-6);
-    }
-
-    for i in 0..n {
-        for j in 0..m {
-            samples[i * m + j] = (samples[i * m + j] - means[j]) / stds[j];
+            samples[[i, j]] = sample_field(field, coord, data);
         }
     }
 
     let mut cov = vec![0.0f32; m * m];
     let denom = (n as f32 - 1.0).max(1.0);
-    for a in 0..m {
-        for b in 0..m {
-            let mut acc = 0.0;
-            for i in 0..n {
-                acc += samples[i * m + a] * samples[i * m + b];
-            }
-            cov[a * m + b] = acc / denom;
+    let means = samples
+        .mean_axis(Axis(0))
+        .ok_or_else(|| anyhow!("no samples for PCA"))?;
+    let centered = &samples - &means;
+    let variances = centered.mapv(|x| x * x).sum_axis(Axis(0)) / denom;
+    let stds = variances.mapv(|x| x.sqrt().max(1e-6));
+    let standardized = centered / &stds;
+
+    let cov_nd = standardized.t().dot(&standardized) / denom;
+    for i in 0..m {
+        for j in 0..m {
+            cov[i * m + j] = cov_nd[[i, j]];
         }
     }
 
-    let pcs = top_pca_vectors(&cov, m, 3);
+    let pcs = top_pca_vectors(cov_nd, 3);
     if pcs.is_empty() {
         anyhow::bail!("PCA failed to produce principal components")
     }
@@ -532,11 +462,11 @@ fn render_pca(data: &RenderData, fields: &[Field], color_space: ColorSpace) -> R
         coeffs.push(channel_coeffs);
     }
 
-    let mut chans = vec![vec![0.0f32; n]; 3];
-    for i in 0..n {
-        let row = &samples[i * m..(i + 1) * m];
-        for k in 0..3 {
-            chans[k][i] = if k < pcs.len() { dot(row, &pcs[k]) } else { 0.0 };
+    let mut chans = Array2::<f32>::zeros((n, 3));
+    for k in 0..3 {
+        if k < pcs.len() {
+            let projected = standardized.dot(&pcs[k]);
+            chans.column_mut(k).assign(&projected);
         }
     }
 
@@ -544,7 +474,7 @@ fn render_pca(data: &RenderData, fields: &[Field], color_space: ColorSpace) -> R
     for k in 0..3 {
         let mut min = f32::INFINITY;
         let mut max = f32::NEG_INFINITY;
-        for v in chans[k].iter().copied() {
+        for v in chans.column(k).iter().copied() {
             min = min.min(v);
             max = max.max(v);
         }
@@ -559,9 +489,9 @@ fn render_pca(data: &RenderData, fields: &[Field], color_space: ColorSpace) -> R
     let mut pixels = vec![0u8; (side * side * 3) as usize];
     for (i, coord) in coords.iter().copied().enumerate() {
         let (x, y) = hex_to_image_coords(coord, data.world.radius);
-        let c1 = normalize(chans[0][i], ranges[0].0, ranges[0].1);
-        let c2 = normalize(chans[1][i], ranges[1].0, ranges[1].1);
-        let c3 = normalize(chans[2][i], ranges[2].0, ranges[2].1);
+        let c1 = normalize(chans[[i, 0]], ranges[0].0, ranges[0].1);
+        let c2 = normalize(chans[[i, 1]], ranges[1].0, ranges[1].1);
+        let c3 = normalize(chans[[i, 2]], ranges[2].0, ranges[2].1);
         let rgb = to_rgb(c1, c2, c3, color_space);
         let idx = ((y * side + x) * 3) as usize;
         pixels[idx] = rgb[0];

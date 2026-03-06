@@ -9,7 +9,7 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio::sync::{mpsc, Mutex};
 use anyhow::{Result, Context, anyhow};
 use argh::FromArgs;
-use std::{collections::{HashMap, HashSet}, hash::{Hash, Hasher}, net::SocketAddr, ops::DerefMut, sync::Arc, time::Duration};
+use std::{collections::HashSet, hash::{Hash, Hasher}, net::SocketAddr, ops::DerefMut, sync::Arc, time::Duration};
 use slab::Slab;
 use serde::{Serialize, Deserialize};
 use smallvec::smallvec;
@@ -292,7 +292,7 @@ fn game_state_from_saved(saved: SavedGame) -> Result<GameState> {
 const PLANT_TICK_DELAY: u64 = 128;
 const FIELD_DECAY_DELAY: u64 = 100;
 const PLANT_GROWTH_SCALE: f32 = 0.01;
-const SOIL_NUTRIENT_CONSUMPTION_RATE: f32 = 0.07;
+const SOIL_NUTRIENT_CONSUMPTION_RATE: f32 = 0.5;
 const SOIL_NUTRIENT_FIXATION_RATE: f32 = 0.0002;
 const WATER_CONSUMPTION_RATE: f32 = 0.03;
 const PLANT_IDLE_WATER_CONSUMPTION_OFFSET: f32 = 0.05;
@@ -302,6 +302,8 @@ const AUTOSAVE_INTERVAL_TICKS: u64 = 1024;
 const PLANT_POLLINATION_RADIUS: i32 = 10; // TODO: should be directional (wind, insects, etc) and vary by plant.
 const PLANT_POLLINATION_SCAN_FRACTION: f32 = 0.1;
 const PLANT_SEEDING_RADIUS: i32 = 5; // TODO: as above
+const PLANT_SEEDING_ATTEMPTS: usize = 10;
+const SOIL_NUTRIENT_DECOMP_RETURN_RATE: f32 = 1.0 / SOIL_NUTRIENT_CONSUMPTION_RATE * 0.6;
 
 async fn game_tick(state: &mut GameState) -> Result<()> {
     let mut buffer = Buffer::new();
@@ -316,7 +318,7 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
     buffer.apply(state);
 
     if state.ticks % FIELD_DECAY_DELAY == 0 {
-        state.dynamic_soil_nutrients.for_each_mut(|nutrients| *nutrients *= 0.9999);
+        state.dynamic_soil_nutrients.for_each_mut(|nutrients| *nutrients *= 0.9995);
     } else if state.ticks % FIELD_DECAY_DELAY == 1 {
         state.dynamic_groundwater.for_each_mut(|water| *water *= 0.999);
     } else if state.ticks % FIELD_DECAY_DELAY == 2 {
@@ -348,7 +350,7 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
             }
             if !occupied && state.map.get_terrain(newpos).entry_cost().is_some() && hex_distance(newpos, pos) >= *spawn_range.start() {
                 let mut spec = EnemySpec::random(&mut rng);
-                spec.drops.push((Item::Bone, StochasticNumber::Triangle { min: 0.7 * spec.initial_health / 40.0, max: 1.3 * spec.initial_health / 40.0, mode: spec.initial_health / 40.0 }));
+                spec.drops.push((Item::Fungible(FungibleItem::Bone), StochasticNumber::Triangle { min: 0.7 * spec.initial_health / 40.0, max: 1.3 * spec.initial_health / 40.0, mode: spec.initial_health / 40.0 }));
                 if spec.ranged {
                     buffer.cmd.spawn((
                         Render(spec.symbol),
@@ -404,11 +406,10 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                 if let Ok(mut health) = state.world.get::<&mut Health>(entity) {
                     health.apply(HealthChangeType::Starvation, -PLANT_DIEOFF_RATE);
                     if health.current <= 0.0 {
-                        // TODO: this is inelegant and should be shared with the other death code
-                        // also, it might break the position tracker
                         buffer.kill(&state.world, entity, &mut rng, None);
-                        state.metrics.plants_died += 1;
-                        // TODO: death should provide decomposition nutrients to soil
+                        state.metrics.plants_died_starvation += 1;
+                        // return nutrients to soil upon death; TODO implement decomposition
+                        state.dynamic_soil_nutrients[pos] += plant.current_size * SOIL_NUTRIENT_DECOMP_RETURN_RATE;
                     }
                 }
             }
@@ -429,15 +430,15 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
 
             state.dynamic_soil_nutrients[pos] -= difference * SOIL_NUTRIENT_CONSUMPTION_RATE;
             plant.nutrients_consumed += difference * SOIL_NUTRIENT_CONSUMPTION_RATE;
+            plant.total_growth += difference;
             if plant.current_size / plant.genome.max_size() > 0.5 {
                 state.dynamic_soil_nutrients[pos] += plant.genome.nutrient_addition_rate() * SOIL_NUTRIENT_FIXATION_RATE;
                 plant.nutrients_added += plant.genome.nutrient_addition_rate() * SOIL_NUTRIENT_FIXATION_RATE;
             }
+            // TODO: water consumption should depend on atmospheric humidity
             let water_consumed = (difference + PLANT_IDLE_WATER_CONSUMPTION_OFFSET) * WATER_CONSUMPTION_RATE * plant.genome.water_efficiency();
             state.dynamic_groundwater[pos] -= water_consumed;
             plant.water_consumed += water_consumed;
-
-            //println!("water={} nutrient={} diff={} consume={}", water, soil_nutrients, difference, water_consumed);
 
             if difference > 0.0 {
                 plant.growth_ticks += 1;
@@ -446,7 +447,11 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                 }
             }
 
-            // TODO: plants should die of old age
+            // TODO: fix
+            if plant.total_growth > plant.genome.max_size() * 2.0 {
+                buffer.kill(&state.world, entity, &mut rng, None);
+                    state.metrics.plants_died_old_age += 1;
+            }
         }
     }
 
@@ -480,9 +485,8 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
             let plant = plant?;
             let other_plant = other_plant?;
 
-            for _ in 0..count_hexes(PLANT_SEEDING_RADIUS) {
+            for _ in 0..PLANT_SEEDING_ATTEMPTS {
                 let newpos = pos + sample_range_rng(PLANT_SEEDING_RADIUS, &mut rng);
-                // TODO: maybe just discard seed here
                 if !state.map.heightmap.in_range(newpos) || state.positions.entities[newpos].is_some() || !hybrid_genome.terrain_valid(&state.map.get_terrain(newpos)) {
                     continue;
                 }
@@ -625,7 +629,7 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                                 Position::single_tile(position, MapLayer::Terrain),
                                 NewlyAdded
                             ));
-                            inventory.add(Item::Dirt, StochasticNumber::triangle_from_min_range(1.0, 3.0).sample_rounded(&mut rng));
+                            inventory.add(Item::Fungible(FungibleItem::Dirt), StochasticNumber::triangle_from_min_range(1.0, 3.0).sample_rounded(&mut rng));
                         }
                     }
                 },
@@ -775,8 +779,9 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                 }
             }
             let health = state.world.get::<&Health>(client.entity)?.current;
-            let inventory = state.world.get::<&Inventory>(client.entity)?.contents
-                .iter().map(|(i, q)| (i.name().to_string(), i.description().to_string(), *q)).filter(|(_, _, q)| *q > 0).collect();
+            // TODO do this properly
+            let inventory = state.world.get::<&Inventory>(client.entity)?.fungible
+                .iter().map(|(i, q)| (Item::Fungible(i.clone()).name().to_string(), Item::Fungible(i.clone()).description().to_string(), *q)).filter(|(_, _, q)| *q > 0).collect();
             client.frames_tx.send(Frame::Display { nearby, health, inventory }).await?;
         } else {
             client.frames_tx.send(Frame::Dead).await?;
