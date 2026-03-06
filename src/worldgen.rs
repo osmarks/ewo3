@@ -9,6 +9,7 @@ pub const WORLD_RADIUS: i32 = 1024;
 const NOISE_SCALE: f32 = 0.0005;
 const HEIGHT_EXPONENT: f32 = 0.3;
 const WATER_SOURCES: usize = 40;
+const CONTOUR_INTERVAL: f32 = 0.1;
 
 pub fn height_baseline_with_radius(pos: Coord, radius: i32) -> f32 {
     let w_frac = (hex_distance(pos, Coord::origin()) as f32 / radius as f32).powf(3.0);
@@ -57,7 +58,8 @@ pub fn generate_heights_with_radius(radius: i32) -> Map<f32> {
     raw
 }
 
-pub fn generate_contours(field: &Map<f32>, interval: f32) -> Vec<(Coord, f32, f32, CoordVec)> {
+pub fn generate_contours(field: &Map<f32>) -> Vec<(Coord, f32, f32, CoordVec)> {
+    let interval = CONTOUR_INTERVAL;
     // Starting at the origin, we want to detect contour lines in any of the six directions.
     // Go in one of the perpendicular directions to generate base directions then scan until the edge is reached starting from any of those points.
     DIRECTIONS.par_iter()
@@ -486,7 +488,9 @@ pub struct GeneratedWorld {
     pub atmo_humidity: Map<f32>,
     pub temperature: Map<f32>,
     pub soil_nutrients: Map<f32>,
-    pub radius: i32
+    pub radius: i32,
+    pub rain: Map<f32>,
+    pub water: Map<f32>,
 }
 
 pub fn generate_world() -> GeneratedWorld {
@@ -499,7 +503,7 @@ pub fn generate_world() -> GeneratedWorld {
 
     let (water, salt) = simulate_water(&mut heightmap, &rain, &sea, &sinks);
 
-    let contours = generate_contours(&heightmap, 0.1);
+    let contours = generate_contours(&heightmap);
 
     for (point, _, _, _) in contours {
         terrain[point] = TerrainType::Contour;
@@ -525,7 +529,9 @@ pub fn generate_world() -> GeneratedWorld {
         salt,
         atmo_humidity,
         temperature,
-        soil_nutrients
+        soil_nutrients,
+        water,
+        rain
     }
 }
 

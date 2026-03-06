@@ -67,7 +67,7 @@ impl Genome {
             - self.nutrient_addition_rate() * 0.16 // nutrient enrichment has a growth tradeoff
             - self.water_tolerance * 0.08
             - self.temperature_tolerance * 0.07
-            - self.salt_tolerance * 0.15;
+            - self.salt_tolerance.max(0.0) * 0.15;
 
         let water_tolerance_coefficient = 15.0 * (1.0 + (-self.water_tolerance).exp());
         let temperature_tolerance_coefficient = 12.0 * (1.0 + (-self.temperature_tolerance).exp());
