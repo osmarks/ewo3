@@ -259,7 +259,7 @@ fn build_derived_data(
     dynamic_soil_nutrients: Map<f32>,
     positions: PositionIndex,
 ) -> RenderData {
-    let (sinks, sea) = get_sea(&world.heightmap);
+    let (_, sea) = get_sea(&world.heightmap);
 
     let mut sea_distance = distance_map(world.radius, sea.iter().copied());
     let radius_f = world.radius as f32;
@@ -738,6 +738,8 @@ fn run_window(data: RenderData, mut settings: RenderSettings) -> Result<()> {
     let mut cached_frame: Option<RenderedImage> = None;
     let mut hovered_coord: Option<Coord> = None;
     let mut selected_coord: Option<Coord> = None;
+    let mut zoom_radius: i32 = 12;
+    let mut zoom_scale: f32 = 12.0;
 
     event_loop.run(move |event, window_target| {
             match event {
@@ -812,6 +814,11 @@ fn run_window(data: RenderData, mut settings: RenderSettings) -> Result<()> {
                                 choose_field_combo(ui, "c2", &mut settings.c2);
                                 choose_field_combo(ui, "c3", &mut settings.c3);
                             }
+
+                            ui.separator();
+                            ui.text("Zoom view");
+                            ui.slider("radius (tiles)", 2, 64, &mut zoom_radius);
+                            ui.slider("scale", 2.0, 40.0, &mut zoom_scale);
                         });
 
                     let settings_changed = last_settings.as_ref() != Some(&settings);
@@ -848,12 +855,12 @@ fn run_window(data: RenderData, mut settings: RenderSettings) -> Result<()> {
                             gl.tex_parameter_i32(
                                 glow::TEXTURE_2D,
                                 glow::TEXTURE_MIN_FILTER,
-                                glow::LINEAR as i32,
+                                glow::NEAREST as i32,
                             );
                             gl.tex_parameter_i32(
                                 glow::TEXTURE_2D,
                                 glow::TEXTURE_MAG_FILTER,
-                                glow::LINEAR as i32,
+                                glow::NEAREST as i32,
                             );
                             gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
                             gl.tex_image_2d(
@@ -880,12 +887,11 @@ fn run_window(data: RenderData, mut settings: RenderSettings) -> Result<()> {
                     let frame = cached_frame.as_ref().expect("cached frame");
                     let tid = map_texture_id.expect("texture id");
 
+                    let map_window_pos = [760.0, 20.0];
+                    let map_window_size = [frame.width as f32 + 24.0, frame.height as f32 + 42.0];
                     ui.window("Map")
-                        .position([760.0, 20.0], Condition::FirstUseEver)
-                        .size(
-                            [frame.width as f32 + 24.0, frame.height as f32 + 42.0],
-                            Condition::FirstUseEver,
-                        )
+                        .position(map_window_pos, Condition::Always)
+                        .size(map_window_size, Condition::Always)
                         .scroll_bar(false)
                         .scrollable(false)
                         .build(|| {
@@ -914,6 +920,63 @@ fn run_window(data: RenderData, mut settings: RenderSettings) -> Result<()> {
                                 if ui.is_mouse_clicked(imgui::MouseButton::Right) {
                                     selected_coord = None;
                                 }
+                            }
+                        });
+
+                    let inspect_coord = selected_coord.or(hovered_coord);
+
+                    let zoom_side = (zoom_radius * 2 + 1) as f32 * zoom_scale.max(1.0);
+                    let desired_zoom_window_size = [zoom_side + 24.0, zoom_side + 42.0];
+                    let zoom_window_size = [
+                        desired_zoom_window_size[0].min((ui.io().display_size[0] - 40.0).max(120.0)),
+                        desired_zoom_window_size[1].min((ui.io().display_size[1] - 40.0).max(120.0)),
+                    ];
+                    let mut zoom_x = map_window_pos[0] + map_window_size[0] + 20.0;
+                    let zoom_y = map_window_pos[1];
+                    let max_x = ui.io().display_size[0] - zoom_window_size[0] - 20.0;
+                    if zoom_x > max_x {
+                        zoom_x = max_x.max(20.0);
+                    }
+
+                    ui.window("Zoom")
+                        .position([zoom_x, zoom_y], Condition::Always)
+                        .size(zoom_window_size, Condition::Always)
+                        .build(|| {
+                            if let Some(coord) = inspect_coord {
+                                let tile_x =
+                                    coord.x + (coord.y - (coord.y & 1)) / 2 + data.world.radius;
+                                let tile_y = coord.y + data.world.radius;
+                                let zr = zoom_radius.max(1) as f32;
+                                let width = frame.width as f32;
+                                let height = frame.height as f32;
+                                let uv0 = [
+                                    ((tile_x as f32 - zr).max(0.0) / width).clamp(0.0, 1.0),
+                                    ((tile_y as f32 - zr).max(0.0) / height).clamp(0.0, 1.0),
+                                ];
+                                let uv1 = [
+                                    ((tile_x as f32 + zr + 1.0).min(width) / width).clamp(0.0, 1.0),
+                                    ((tile_y as f32 + zr + 1.0).min(height) / height).clamp(0.0, 1.0),
+                                ];
+                                imgui::Image::new(tid, [zoom_side, zoom_side])
+                                    .uv0(uv0)
+                                    .uv1(uv1)
+                                    .build(ui);
+                                let min = ui.item_rect_min();
+                                let max = ui.item_rect_max();
+                                let cx = (min[0] + max[0]) * 0.5;
+                                let cy = (min[1] + max[1]) * 0.5;
+                                let len = 10.0;
+                                let color = imgui::ImColor32::from_rgba_f32s(1.0, 1.0, 1.0, 1.0);
+                                let draw = ui.get_window_draw_list();
+                                draw.add_line([cx - len, cy], [cx + len, cy], color)
+                                    .thickness(3.0)
+                                    .build();
+                                draw.add_line([cx, cy - len], [cx, cy + len], color)
+                                    .thickness(3.0)
+                                    .build();
+                            } else {
+                                ui.text("hover map to zoom");
+                                ui.text("left-click map to lock selection");
                             }
                         });
 
@@ -962,7 +1025,6 @@ fn run_window(data: RenderData, mut settings: RenderSettings) -> Result<()> {
                             }
 
                             ui.separator();
-                            let inspect_coord = selected_coord.or(hovered_coord);
                             if let Some(coord) = inspect_coord {
                                 if selected_coord.is_some() {
                                     ui.text(format!("selected: {:?}", coord));
