@@ -127,9 +127,9 @@ impl Genome {
         }
     }
 
-    // TODO: this might be unreasonable
+    // TODO: do this better
     pub fn water_efficiency(&self) -> f32 {
-        sigmoid(self.optimal_water_level * 3.0 - 1.0)
+        sigmoid(self.optimal_water_level)
     }
 
     pub fn hybridize(&self, rng: &mut fastrand::Rng, other: &Genome) -> Option<Genome> {

@@ -20,8 +20,8 @@ pub mod config {
     pub const PLANT_GROWTH_SCALE: f32 = 0.01;
     pub const SOIL_NUTRIENT_CONSUMPTION_RATE: f32 = 0.5;
     pub const SOIL_NUTRIENT_FIXATION_RATE: f32 = 0.002;
-    pub const WATER_CONSUMPTION_RATE: f32 = 0.06;
-    pub const PLANT_IDLE_WATER_CONSUMPTION_OFFSET: f32 = 0.05;
+    pub const WATER_CONSUMPTION_RATE: f32 = 0.1;
+    pub const PLANT_IDLE_WATER_CONSUMPTION_OFFSET: f32 = 0.2;
     pub const PLANT_DIEOFF_THRESHOLD: f32 = 0.3;
     pub const PLANT_DIEOFF_RATE: f32 = 0.2;
     pub const AUTOSAVE_INTERVAL_TICKS: u64 = 1024;

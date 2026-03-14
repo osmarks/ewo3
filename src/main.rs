@@ -397,7 +397,7 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
             }
 
             let original_size = plant.current_size;
-            plant.current_size += plant.genome.base_growth_rate(soil_nutrients, water, temperature, salt, terrain) * PLANT_GROWTH_SCALE * plant.current_size.powf(-0.25); // allometric scaling law
+            plant.current_size += plant.genome.base_growth_rate(soil_nutrients, water, temperature, salt, terrain) * PLANT_GROWTH_SCALE * plant.current_size.max(0.1).powf(-0.25); // allometric scaling law
             let difference = (plant.current_size - original_size).max(0.0);
 
             if plant.can_reproduce() {
@@ -425,7 +425,8 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
             if difference > 0.0 {
                 plant.growth_ticks += 1;
                 if let Ok(mut health) = state.world.get::<&mut Health>(entity) {
-                    health.apply(HealthChangeType::NaturalRegeneration, difference);
+                    health.max += difference;
+                    health.apply(HealthChangeType::NaturalRegeneration, difference * 2.0);
                 }
             }
 
@@ -485,7 +486,7 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                 buffer.cmd.spawn((
                     Position::single_tile(newpos, MapLayer::Entities),
                     Render('+'),
-                    Health::new(10.0, 10.0),
+                    Health::new(1.0, 1.0),
                     Plant::new(hybrid_genome.clone()),
                     NewlyAdded
                 ));
@@ -906,7 +907,7 @@ async fn main() -> Result<()> {
                 batch.push((
                     Position::single_tile(pos, MapLayer::Entities),
                     Render('+'),
-                    Health::new(10.0, 10.0),
+                    Health::new(1.0, 1.0),
                     //ShrinkOnDeath,
                     Plant::new(genome),
                     NewlyAdded

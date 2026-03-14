@@ -205,13 +205,13 @@ pub fn compute_groundwater(water: &Map<f32>, rain: &Map<f32>, heightmap: &Map<f3
     let mut groundwater = distance_map(
         water.radius,
         water.iter().filter_map(|(c, i)| if *i > 0.0 { Some(c) } else { None }));
-    percentilize(&mut groundwater, |x| (1.0 - x).powf(0.3));
+    percentilize(&mut groundwater, |x| (1.0 - x).powf(1.1));
 
     for (coord, gw) in groundwater.iter_mut() {
-        *gw -= heightmap[coord] * 0.05;
-        *gw += rain[coord] * 0.15;
+        //*gw -= heightmap[coord] * 0.05;
+        *gw += rain[coord] * 0.5;
+        *gw = gw.clamp(0.0, 1.0);
     }
-    percentilize(&mut groundwater, |x| x.powf(0.7));
     groundwater
 }
 

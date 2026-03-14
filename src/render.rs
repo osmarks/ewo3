@@ -125,9 +125,11 @@ define_fields! {
         SeaDistance => "sea_distance",
         Plants => "plant_growth",
         PlantsAge => "plant_age",
-        PlantsLifespanFraction => "plant_lifespan_fraction",
+        PlantsLifespanFraction => "plant_life",
         DynamicGroundwater => "dynamic_groundwater",
         DynamicSoil => "dynamic_soil",
+        EntityHealth => "health",
+        EntityHealthFraction => "health_fraction",
     }
 }
 
@@ -176,6 +178,8 @@ struct RenderData {
     plants_lifespan_fraction: Map<f32>,
     dynamic_groundwater: Map<f32>,
     dynamic_soil: Map<f32>,
+    entity_health: Map<f32>,
+    entity_health_fraction: Map<f32>,
 }
 
 struct RenderedImage {
@@ -216,6 +220,8 @@ fn sample_field(field: Field, position: Coord, data: &RenderData) -> f32 {
         Field::PlantsLifespanFraction => data.plants_lifespan_fraction[position],
         Field::DynamicGroundwater => data.dynamic_groundwater[position],
         Field::DynamicSoil => data.dynamic_soil[position],
+        Field::EntityHealth => data.entity_health[position],
+        Field::EntityHealthFraction => data.entity_health_fraction[position],
     }
 }
 
@@ -300,6 +306,17 @@ fn build_derived_data(
         plants_lifespan_fraction[pos] = plant.age as f32 / (plant.genome.lifespan() * PLANT_LIFESPAN_SCALE);
     }
 
+    let mut entity_health = Map::new(world.radius, 0.0f32);
+    let mut entity_health_fraction = Map::new(world.radius, 0.0f32);
+    for (position, health) in ecs_world.query::<(&Position, &Health)>().iter() {
+        let pos = position.head();
+        if !plants.in_range(pos) {
+            continue;
+        }
+        entity_health[pos] = health.current;
+        entity_health_fraction[pos] = health.current / health.max;
+    }
+
     RenderData {
         world,
         ecs_world,
@@ -312,7 +329,9 @@ fn build_derived_data(
         plants_age,
         plants_lifespan_fraction,
         dynamic_groundwater,
-        dynamic_soil: dynamic_soil_nutrients
+        dynamic_soil: dynamic_soil_nutrients,
+        entity_health,
+        entity_health_fraction,
     }
 }
 
