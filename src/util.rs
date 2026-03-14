@@ -18,9 +18,9 @@ pub mod config {
     pub const PLANT_TICK_DELAY: u64 = 128;
     pub const FIELD_DECAY_DELAY: u64 = 100;
     pub const PLANT_GROWTH_SCALE: f32 = 0.01;
-    pub const SOIL_NUTRIENT_CONSUMPTION_RATE: f32 = 0.5;
-    pub const SOIL_NUTRIENT_FIXATION_RATE: f32 = 0.002;
-    pub const WATER_CONSUMPTION_RATE: f32 = 0.1;
+    pub const SOIL_NUTRIENT_CONSUMPTION_RATE: f32 = 0.8;
+    pub const SOIL_NUTRIENT_FIXATION_RATE: f32 = 0.1;
+    pub const WATER_CONSUMPTION_RATE: f32 = 0.05;
     pub const PLANT_IDLE_WATER_CONSUMPTION_OFFSET: f32 = 0.2;
     pub const PLANT_DIEOFF_THRESHOLD: f32 = 0.3;
     pub const PLANT_DIEOFF_RATE: f32 = 0.2;
@@ -32,8 +32,8 @@ pub mod config {
     pub const SOIL_NUTRIENT_DECOMP_RETURN_RATE: f32 = 1.0 / SOIL_NUTRIENT_CONSUMPTION_RATE * 0.6;
     pub const PLANT_LIFESPAN_SCALE: f32 = 1.0 / PLANT_GROWTH_SCALE;
     pub const PLANT_REPRODUCTION_ATTEMPT_COST: f32 = 0.01;
-    pub const PLANT_CHILD_COST: f32 = 0.05; // TODO genome parameter, tie to initial size
-    pub const INITIAL_PLANTS: usize = 262144;
+    pub const INITIAL_PLANTS: usize = 131072;
+    pub const EVOLUTION_RATE: f32 = 0.1;
     // Runtime game logic (misc)
     pub const VIEW: i32 = 15;
     pub const RANDOM_DESPAWN_INV_RATE: u64 = 4000;

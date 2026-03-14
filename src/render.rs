@@ -3,12 +3,6 @@ extern crate test;
 
 use anyhow::{anyhow, Context, Result};
 use argh::FromArgs;
-use ewo3::components::{Health, MapLayer, Plant, Position, PositionIndex, Render};
-use ewo3::map::*;
-use ewo3::save::SavedGame;
-use ewo3::world_serde;
-use ewo3::worldgen::*;
-use ewo3::util::config::*;
 use glow::HasContext;
 use glutin::config::ConfigTemplateBuilder;
 use glutin::context::{ContextAttributesBuilder, NotCurrentGlContext, PossiblyCurrentContext};
@@ -21,12 +15,22 @@ use ndarray::{Array1, Array2, Axis};
 use hecs::World;
 use image::{ImageBuffer, Rgb};
 use imgui_winit_support::{HiDpiMode, WinitPlatform};
+use palette::IntoColor;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::time::Instant;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::EventLoopBuilder;
 use raw_window_handle::HasRawWindowHandle;
+use linearize::{Linearize, LinearizeExt};
+
+use ewo3::components::{Health, MapLayer, Plant, Position, PositionIndex, Render};
+use ewo3::map::*;
+use ewo3::plant::CropType;
+use ewo3::save::SavedGame;
+use ewo3::world_serde;
+use ewo3::worldgen::*;
+use ewo3::util::config::*;
 
 #[derive(FromArgs)]
 /// Render world/debug fields from generated terrain or a saved game.
@@ -130,19 +134,23 @@ define_fields! {
         DynamicSoil => "dynamic_soil",
         EntityHealth => "health",
         EntityHealthFraction => "health_fraction",
+        PlantsType => "plant_type"
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Linearize)]
 enum ColorSpace {
     Rgb,
     Oklab,
+    Hsv
 }
 
+// TODO: do this better
 impl ColorSpace {
     fn parse(s: &str) -> Self {
         match s {
             "oklab" => Self::Oklab,
+            "hsv" => Self::Hsv,
             _ => Self::Rgb,
         }
     }
@@ -151,6 +159,7 @@ impl ColorSpace {
         match self {
             ColorSpace::Rgb => "rgb",
             ColorSpace::Oklab => "oklab",
+            ColorSpace::Hsv => "hsv",
         }
     }
 }
@@ -180,6 +189,7 @@ struct RenderData {
     dynamic_soil: Map<f32>,
     entity_health: Map<f32>,
     entity_health_fraction: Map<f32>,
+    plants_type: Map<f32>,
 }
 
 struct RenderedImage {
@@ -222,6 +232,7 @@ fn sample_field(field: Field, position: Coord, data: &RenderData) -> f32 {
         Field::DynamicSoil => data.dynamic_soil[position],
         Field::EntityHealth => data.entity_health[position],
         Field::EntityHealthFraction => data.entity_health_fraction[position],
+        Field::PlantsType => data.plants_type[position],
     }
 }
 
@@ -242,14 +253,13 @@ fn field_range(field: Option<Field>, data: &RenderData) -> (f32, f32) {
 }
 
 fn to_rgb(c1: f32, c2: f32, c3: f32, color_space: ColorSpace) -> [u8; 3] {
-    let (r, g, b) = match color_space {
-        ColorSpace::Rgb => (c1, c2, c3),
-        ColorSpace::Oklab => {
-            let rgb = oklab::oklab_to_srgb_f32(oklab::Oklab { l: c1.clamp(0.0, 1.0), a: c2 * 1.0 - 0.5, b: c3 * 1.0 - 0.5 });
-            (rgb.r, rgb.g, rgb.b)
-        }
+    let transformed: palette::Srgb = match color_space {
+        ColorSpace::Rgb => palette::Srgb::from_components((c1, c2, c3)).into_color(),
+        ColorSpace::Oklab => palette::Oklab::from_components((c1.clamp(0.0, 1.0), c2 * 1.0 - 0.5, c3 * 1.0 - 0.5)).into_color(),
+        ColorSpace::Hsv => palette::Hsv::from_components((c1 * 360.0, c2, c3)).into_color(),
     };
-    [(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8]
+
+    [(transformed.red * 255.0) as u8, (transformed.green * 255.0) as u8, (transformed.blue * 255.0) as u8]
 }
 
 fn build_derived_data(
@@ -287,6 +297,7 @@ fn build_derived_data(
     let mut plants = Map::new(world.radius, 0.0f32);
     let mut plants_age = Map::new(world.radius, 0.0f32);
     let mut plants_lifespan_fraction = Map::new(world.radius, 0.0f32);
+    let mut plants_type = Map::new(world.radius, 0.0f32);
     for (position, plant) in ecs_world.query::<(&Position, &Plant)>().iter() {
         let pos = position.head();
         if !plants.in_range(pos) {
@@ -304,10 +315,17 @@ fn build_derived_data(
         }
         plants_age[pos] = plant.age as f32;
         plants_lifespan_fraction[pos] = plant.age as f32 / (plant.genome.lifespan() * PLANT_LIFESPAN_SCALE);
+        match plant.genome.crop_type {
+            CropType::Grass => plants_type[pos] = 1.0f32,
+            CropType::BushTomato => plants_type[pos] = 2.0f32,
+            CropType::GoldenWattleTree => plants_type[pos] = 3.0f32,
+            CropType::EucalyptusTree => plants_type[pos] = 0.0f32,
+        }
     }
 
     let mut entity_health = Map::new(world.radius, 0.0f32);
     let mut entity_health_fraction = Map::new(world.radius, 0.0f32);
+
     for (position, health) in ecs_world.query::<(&Position, &Health)>().iter() {
         let pos = position.head();
         if !plants.in_range(pos) {
@@ -332,6 +350,7 @@ fn build_derived_data(
         dynamic_soil: dynamic_soil_nutrients,
         entity_health,
         entity_health_fraction,
+        plants_type,
     }
 }
 
@@ -781,10 +800,10 @@ fn run_window(data: RenderData, mut settings: RenderSettings) -> Result<()> {
                                 settings.normalize = normalize;
                             }
 
-                            let mut cs_idx = if settings.color_space == ColorSpace::Rgb { 0 } else { 1 };
-                            let cs_labels = ["rgb", "oklab"];
-                            if ui.combo_simple_string("Color space", &mut cs_idx, &cs_labels) {
-                                settings.color_space = if cs_idx == 0 { ColorSpace::Rgb } else { ColorSpace::Oklab };
+                            let mut cs_idx = settings.color_space.linearize();
+                            // TODO this should be static
+                            if ui.combo_simple_string("Color space", &mut cs_idx, &ColorSpace::variants().map(|x| x.name()).collect::<Vec<&'static str>>()) {
+                                settings.color_space = ColorSpace::from_linear(cs_idx).unwrap();
                             }
 
                             if pca_mode {
@@ -969,10 +988,10 @@ fn run_window(data: RenderData, mut settings: RenderSettings) -> Result<()> {
                                 let color = imgui::ImColor32::from_rgba_f32s(1.0, 1.0, 1.0, 1.0);
                                 let draw = ui.get_window_draw_list();
                                 draw.add_line([cx - len, cy], [cx + len, cy], color)
-                                    .thickness(3.0)
+                                    .thickness(2.0)
                                     .build();
                                 draw.add_line([cx, cy - len], [cx, cy + len], color)
-                                    .thickness(3.0)
+                                    .thickness(2.0)
                                     .build();
                             } else {
                                 ui.text("hover map to zoom");

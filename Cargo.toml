@@ -28,7 +28,6 @@ smallvec = { version = "1", features = ["serde"] }
 argh = "0.1"
 ndarray-conv = "0.6.0"
 ndarray = "0.17.2"
-enum-map = { version = "2.7.3", features = ["serde"] }
 imgui = "0.12"
 imgui-winit-support = "0.12"
 imgui-glow-renderer = "0.12"
@@ -37,7 +36,8 @@ glutin = "0.31"
 glutin-winit = "0.4"
 raw-window-handle = "0.5"
 winit = "0.29"
-oklab = "1.1.2"
+linearize = { version = "0.1.6", features = ["derive", "serde-1"] }
+palette = "0.7.6"
 
 [[bin]]
 name = "render"

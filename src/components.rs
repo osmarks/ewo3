@@ -5,7 +5,7 @@ use indexmap::IndexMap;
 use hecs::Entity;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
-use enum_map::{Enum, EnumMap};
+use linearize::{Linearize, StaticMap};
 
 use crate::map::*;
 use crate::plant;
@@ -22,7 +22,7 @@ pub enum NonFungibleItem {
     Seed(plant::Genome)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Enum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Linearize, Copy)]
 pub enum HealthChangeType {
     BluntForce,
     Magic,
@@ -187,8 +187,8 @@ impl HealthChangeModifier {
 pub struct Health {
     pub current: f32,
     pub max: f32,
-    pub health_change_totals: EnumMap<HealthChangeType, f32>,
-    pub health_change_modifiers: EnumMap<HealthChangeType, HealthChangeModifier>
+    pub health_change_totals: StaticMap<HealthChangeType, f32>,
+    pub health_change_modifiers: StaticMap<HealthChangeType, HealthChangeModifier>
 }
 
 impl Health {
@@ -204,8 +204,8 @@ impl Health {
         Self {
             current,
             max,
-            health_change_modifiers: EnumMap::from_fn(|_| HealthChangeModifier::default()),
-            health_change_totals: EnumMap::from_fn(|_| 0.0)
+            health_change_modifiers: StaticMap::from_fn(|_| HealthChangeModifier::default()),
+            health_change_totals: StaticMap::from_fn(|_| 0.0)
         }
     }
 
@@ -221,8 +221,8 @@ impl Health {
         Self {
             current: f32::MAX,
             max: f32::MAX,
-            health_change_modifiers: EnumMap::from_fn(|_| HealthChangeModifier::invulnerable()),
-            health_change_totals: EnumMap::from_fn(|_| 0.0)
+            health_change_modifiers: StaticMap::from_fn(|_| HealthChangeModifier::invulnerable()),
+            health_change_totals: StaticMap::from_fn(|_| 0.0)
         }
     }
 }
@@ -395,10 +395,10 @@ pub struct Plant {
 }
 
 impl Plant {
-    pub fn new(genome: plant::Genome) -> Self {
+    pub fn new(genome: plant::Genome, size: f32) -> Self {
         Self {
             genome,
-            current_size: 0.1,
+            current_size: size * 0.1,
             nutrients_consumed: 0.0,
             nutrients_added: 0.0,
             water_consumed: 0.0,

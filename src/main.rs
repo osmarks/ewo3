@@ -302,7 +302,12 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
     if state.ticks % FIELD_DECAY_DELAY == 0 {
         state.dynamic_soil_nutrients.for_each_mut(|nutrients| *nutrients *= 0.9999);
     } else if state.ticks % FIELD_DECAY_DELAY == 1 {
-        state.dynamic_groundwater.for_each_mut(|water| *water *= 0.999);
+        for (pos, water) in state.dynamic_groundwater.iter_mut() {
+            *water *= 0.999;
+            if state.map.water[pos] > 0.0 {
+                *water *= 0.9; // reversion to baseline much faster in active water areas
+            }
+        }
     } else if state.ticks % FIELD_DECAY_DELAY == 2 {
         state.dynamic_soil_nutrients = smooth(&state.dynamic_soil_nutrients, 3);
     } else if state.ticks % FIELD_DECAY_DELAY == 3 {
@@ -472,7 +477,7 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
         }
 
         if let Some(other) = maybe_other {
-            // TODO: multiple seeds from one plant with different genomes\
+            // TODO: multiple seeds from one plant with different hybridizations?
             let [plant, other_plant] = state.world.query_disjoint_mut::<&mut Plant, 2>([entity, other]);
             let plant = plant?;
             let other_plant = other_plant?;
@@ -483,18 +488,23 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                 if !state.map.heightmap.in_range(newpos) || state.positions.entities[newpos].is_some() || !hybrid_genome.terrain_valid(&state.map.get_terrain(newpos)) {
                     continue;
                 }
+
+                let child_size = (plant.genome.initial_size_scale() + other_plant.genome.initial_size_scale()) * 0.5;
+
                 buffer.cmd.spawn((
                     Position::single_tile(newpos, MapLayer::Entities),
                     Render('+'),
-                    Health::new(1.0, 1.0),
-                    Plant::new(hybrid_genome.clone()),
+                    // TODO: work out more reasonable health/size parameterization, or at least factor this out
+                    Health::new(1.0 + (child_size - 1.0) * 2.0, 1.0 + (child_size - 1.0) * 2.0),
+                    Plant::new(hybrid_genome.clone(), child_size),
                     NewlyAdded
                 ));
                 plant.children += 1;
                 other_plant.children += 1;
                 // TODO: can this go negative?
-                plant.current_size -= PLANT_CHILD_COST;
-                other_plant.current_size -= PLANT_CHILD_COST;
+                // TODO: gendering?
+                plant.current_size -= plant.genome.initial_size_scale() * 0.5;
+                other_plant.current_size -= other_plant.genome.initial_size_scale() * 0.5;
                 state.metrics.plants_reproduced += 1;
                 break;
             }
@@ -904,12 +914,13 @@ async fn main() -> Result<()> {
             let radius = state.map.radius();
             let pos = Coord::origin() + sample_range(&mut state.rng, radius);
             if genome.base_growth_rate(state.actual_soil_nutrients(pos), state.actual_groundwater(pos), state.baseline_temperature[pos], state.baseline_salt[pos], &state.map.get_terrain(pos)) > 0.2 && !used.contains(&pos) {
+                let initial_size = genome.initial_size_scale();
                 batch.push((
                     Position::single_tile(pos, MapLayer::Entities),
                     Render('+'),
-                    Health::new(1.0, 1.0),
+                    Health::new(1.0 + (initial_size - 1.0) * 2.0, 1.0 + (initial_size - 1.0) * 2.0),
                     //ShrinkOnDeath,
-                    Plant::new(genome),
+                    Plant::new(genome, initial_size),
                     NewlyAdded
                 ));
                 used.insert(pos);
