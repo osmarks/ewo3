@@ -40,9 +40,9 @@ pub fn rotate_60(p0: CoordVec) -> CoordVec {
 
 pub const DIRECTIONS: &[CoordVec] = &[CoordVec::new(0, -1), CoordVec::new(1, -1), CoordVec::new(-1, 0), CoordVec::new(1, 0), CoordVec::new(0, 1), CoordVec::new(-1, 1)];
 
-pub fn sample_range(range: i32) -> CoordVec {
-    let q = fastrand::i32(-range..=range);
-    let r = fastrand::i32((-range).max(-q-range)..=range.min(-q+range));
+pub fn sample_range(rng: &mut fastrand::Rng, range: i32) -> CoordVec {
+    let q = rng.i32(-range..=range);
+    let r = rng.i32((-range).max(-q-range)..=range.min(-q+range));
     CoordVec::new(q, r)
 }
 

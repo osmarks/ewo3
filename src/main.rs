@@ -20,6 +20,7 @@ use ewo3::plant;
 use ewo3::save::{SavedGame, GameMetrics};
 use ewo3::world_serde;
 use ewo3::worldgen;
+use ewo3::util::config::*;
 
 #[derive(FromArgs)]
 /// Run the game server.
@@ -111,9 +112,6 @@ struct Client {
     frames_tx: mpsc::Sender<Frame>,
     entity: Entity
 }
-
-const VIEW: i32 = 15;
-const RANDOM_DESPAWN_INV_RATE: u64 = 4000;
 
 struct EnemySpec {
     symbol: char,
@@ -289,22 +287,6 @@ fn game_state_from_saved(saved: SavedGame) -> Result<GameState> {
     })
 }
 
-const PLANT_TICK_DELAY: u64 = 128;
-const FIELD_DECAY_DELAY: u64 = 100;
-const PLANT_GROWTH_SCALE: f32 = 0.01;
-const SOIL_NUTRIENT_CONSUMPTION_RATE: f32 = 0.5;
-const SOIL_NUTRIENT_FIXATION_RATE: f32 = 0.0002;
-const WATER_CONSUMPTION_RATE: f32 = 0.03;
-const PLANT_IDLE_WATER_CONSUMPTION_OFFSET: f32 = 0.05;
-const PLANT_DIEOFF_THRESHOLD: f32 = 0.3;
-const PLANT_DIEOFF_RATE: f32 = 0.2;
-const AUTOSAVE_INTERVAL_TICKS: u64 = 1024;
-const PLANT_POLLINATION_RADIUS: i32 = 10; // TODO: should be directional (wind, insects, etc) and vary by plant.
-const PLANT_POLLINATION_SCAN_FRACTION: f32 = 0.1;
-const PLANT_SEEDING_RADIUS: i32 = 5; // TODO: as above
-const PLANT_SEEDING_ATTEMPTS: usize = 10;
-const SOIL_NUTRIENT_DECOMP_RETURN_RATE: f32 = 1.0 / SOIL_NUTRIENT_CONSUMPTION_RATE * 0.6;
-
 async fn game_tick(state: &mut GameState) -> Result<()> {
     let mut buffer = Buffer::new();
 
@@ -318,7 +300,7 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
     buffer.apply(state);
 
     if state.ticks % FIELD_DECAY_DELAY == 0 {
-        state.dynamic_soil_nutrients.for_each_mut(|nutrients| *nutrients *= 0.9995);
+        state.dynamic_soil_nutrients.for_each_mut(|nutrients| *nutrients *= 0.9999);
     } else if state.ticks % FIELD_DECAY_DELAY == 1 {
         state.dynamic_groundwater.for_each_mut(|water| *water *= 0.999);
     } else if state.ticks % FIELD_DECAY_DELAY == 2 {
@@ -408,21 +390,21 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                     if health.current <= 0.0 {
                         buffer.kill(&state.world, entity, &mut rng, None);
                         state.metrics.plants_died_starvation += 1;
-                        // return nutrients to soil upon death; TODO implement decomposition
+                        // return nutrients to soil upon death; TODO implement decomposition modelling
                         state.dynamic_soil_nutrients[pos] += plant.current_size * SOIL_NUTRIENT_DECOMP_RETURN_RATE;
                     }
                 }
             }
 
             let original_size = plant.current_size;
-            plant.current_size += plant.genome.effective_growth_rate(soil_nutrients, water, temperature, salt, terrain) * PLANT_GROWTH_SCALE * plant.current_size.powf(-0.25); // allometric scaling law
-            plant.current_size = plant.current_size.min(plant.genome.max_size());
+            plant.current_size += plant.genome.base_growth_rate(soil_nutrients, water, temperature, salt, terrain) * PLANT_GROWTH_SCALE * plant.current_size.powf(-0.25); // allometric scaling law
             let difference = (plant.current_size - original_size).max(0.0);
 
             if plant.can_reproduce() {
                 plant.ready_for_reproduce_ticks += 1;
                 if rng.f32() < plant.genome.reproduction_rate() {
                     plants_to_reproduce.push(entity);
+                    plant.current_size -= PLANT_REPRODUCTION_ATTEMPT_COST;
                 }
             } else {
                 plant.ready_for_reproduce_ticks = 0;
@@ -431,7 +413,7 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
             state.dynamic_soil_nutrients[pos] -= difference * SOIL_NUTRIENT_CONSUMPTION_RATE;
             plant.nutrients_consumed += difference * SOIL_NUTRIENT_CONSUMPTION_RATE;
             plant.total_growth += difference;
-            if plant.current_size / plant.genome.max_size() > 0.5 {
+            if plant.current_size > plant.genome.mature_size() {
                 state.dynamic_soil_nutrients[pos] += plant.genome.nutrient_addition_rate() * SOIL_NUTRIENT_FIXATION_RATE;
                 plant.nutrients_added += plant.genome.nutrient_addition_rate() * SOIL_NUTRIENT_FIXATION_RATE;
             }
@@ -447,10 +429,18 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                 }
             }
 
-            // TODO: fix
-            if plant.total_growth > plant.genome.max_size() * 2.0 {
-                buffer.kill(&state.world, entity, &mut rng, None);
-                    state.metrics.plants_died_old_age += 1;
+            plant.age += 1;
+
+            if plant.age as f32 > plant.genome.lifespan() * PLANT_LIFESPAN_SCALE {
+                // TODO refactor
+                if let Ok(mut health) = state.world.get::<&mut Health>(entity) {
+                    health.apply(HealthChangeType::Senescence, -PLANT_DIEOFF_RATE);
+                    if health.current <= 0.0 {
+                        buffer.kill(&state.world, entity, &mut rng, None);
+                        state.metrics.plants_died_old_age += 1;
+                        state.dynamic_soil_nutrients[pos] += plant.current_size * SOIL_NUTRIENT_DECOMP_RETURN_RATE;
+                    }
+                }
             }
         }
     }
@@ -462,7 +452,7 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
 
         let count = count_hexes(PLANT_POLLINATION_RADIUS);
         let reproduction_tries = (count as f32 * PLANT_POLLINATION_SCAN_FRACTION).ceil() as usize;
-        let mut hybrid_genome = None;
+        let mut maybe_other = None;
         for _ in 0..reproduction_tries {
             let newpos = pos + sample_range_rng(PLANT_POLLINATION_RADIUS, &mut rng);
             if !state.map.heightmap.in_range(newpos) || newpos == pos {
@@ -471,8 +461,8 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
             if let Some(other) = state.positions.entities[newpos] {
                 if let Ok(other_plant) = state.world.get::<&mut Plant>(other) {
                     if other_plant.can_reproduce() {
-                        if let Some(hybrid) = other_plant.genome.hybridize(&own_genome) {
-                            hybrid_genome = Some((hybrid, other));
+                        if let Some(_hybrid) = other_plant.genome.hybridize(&mut rng, &own_genome) {
+                            maybe_other = Some(other);
                             break;
                         }
                     }
@@ -480,10 +470,12 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
             }
         }
 
-        if let Some((hybrid_genome, other)) = hybrid_genome {
+        if let Some(other) = maybe_other {
+            // TODO: multiple seeds from one plant with different genomes\
             let [plant, other_plant] = state.world.query_disjoint_mut::<&mut Plant, 2>([entity, other]);
             let plant = plant?;
             let other_plant = other_plant?;
+            let hybrid_genome = other_plant.genome.hybridize(&mut rng, &own_genome).unwrap();
 
             for _ in 0..PLANT_SEEDING_ATTEMPTS {
                 let newpos = pos + sample_range_rng(PLANT_SEEDING_RADIUS, &mut rng);
@@ -499,8 +491,9 @@ async fn game_tick(state: &mut GameState) -> Result<()> {
                 ));
                 plant.children += 1;
                 other_plant.children += 1;
-                plant.current_size *= plant.genome.reproductive_size_fraction(); // TODO: explicit cooldown?
-                other_plant.current_size *= other_plant.genome.reproductive_size_fraction(); // TODO: vary this by plant component gender?
+                // TODO: can this go negative?
+                plant.current_size -= PLANT_CHILD_COST;
+                other_plant.current_size -= PLANT_CHILD_COST;
                 state.metrics.plants_reproduced += 1;
                 break;
             }
@@ -859,8 +852,6 @@ async fn save_game(state: &GameState) -> Result<()> {
     Ok(())
 }
 
-const INITIAL_PLANTS: usize = 262144;
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut loaded_save = false;
@@ -908,15 +899,16 @@ async fn main() -> Result<()> {
         let mut batch = Vec::with_capacity(INITIAL_PLANTS);
         let mut used = HashSet::new();
         while batch.len() < INITIAL_PLANTS {
-            let genome = plant::Genome::random();
-            let pos = Coord::origin() + sample_range(state.map.radius());
+            let genome = plant::Genome::random(&mut state.rng);
+            let radius = state.map.radius();
+            let pos = Coord::origin() + sample_range(&mut state.rng, radius);
             if genome.base_growth_rate(state.actual_soil_nutrients(pos), state.actual_groundwater(pos), state.baseline_temperature[pos], state.baseline_salt[pos], &state.map.get_terrain(pos)) > 0.2 && !used.contains(&pos) {
                 batch.push((
                     Position::single_tile(pos, MapLayer::Entities),
                     Render('+'),
                     Health::new(10.0, 10.0),
                     //ShrinkOnDeath,
-                    Plant::new(plant::Genome::random()),
+                    Plant::new(genome),
                     NewlyAdded
                 ));
                 used.insert(pos);

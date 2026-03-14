@@ -45,3 +45,6 @@ path = "src/render.rs"
 
 [profile.release]
 debug = true
+
+[patch.crates-io]
+hecs = { git = "https://github.com/osmarks/hecs-patch" }

@@ -3,13 +3,8 @@ use std::{cmp::Ordering, collections::{hash_map::Entry, BinaryHeap, HashMap, Has
 use noise_functions::Sample3;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use crate::util::config::*;
 use crate::map::*;
-
-pub const WORLD_RADIUS: i32 = 1024;
-const NOISE_SCALE: f32 = 0.0005;
-const HEIGHT_EXPONENT: f32 = 0.3;
-const WATER_SOURCES: usize = 40;
-const CONTOUR_INTERVAL: f32 = 0.1;
 
 pub fn height_baseline_with_radius(pos: Coord, radius: i32) -> f32 {
     let w_frac = (hex_distance(pos, Coord::origin()) as f32 / radius as f32).powf(3.0);
@@ -33,7 +28,7 @@ fn percentilize<F: Fn(f32) -> f32>(raw: &mut Map<f32>, postprocess: F) {
     }
 }
 
-fn normalize<F: Fn(f32) -> f32 + Sync>(raw: &mut Map<f32>, postprocess: F) {
+pub fn normalize<F: Fn(f32) -> f32 + Sync>(raw: &mut Map<f32>, postprocess: F) {
     let mut min = raw.iter_data().copied().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap();
     let mut max = raw.iter_data().copied().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap();
     if min == max {
@@ -220,10 +215,6 @@ pub fn compute_groundwater(water: &Map<f32>, rain: &Map<f32>, heightmap: &Map<f3
     groundwater
 }
 
-const SEA_LEVEL: f32 = -0.8;
-const EROSION: f32 = 0.09;
-const EROSION_EXPONENT: f32 = 1.5;
-
 fn floodfill(src: Coord, all: &HashSet<Coord>) -> HashSet<Coord> {
     let mut out = HashSet::new();
     let mut queue = VecDeque::new();
@@ -246,9 +237,6 @@ pub fn get_sea(heightmap: &Map<f32>) -> (HashSet<Coord>, HashSet<Coord>) {
     let sea = floodfill(Coord::new(0, heightmap.radius), &sinks);
     (sinks, sea)
 }
-
-const SALT_REMOVAL: f32 = 0.13;
-const SALT_RANGE: f32 = 0.33;
 
 pub fn simulate_water(heightmap: &mut Map<f32>, rain_map: &Map<f32>, sea: &HashSet<Coord>, sinks: &HashSet<Coord>) -> (Map<f32>, Map<f32>) {
     let mut watermap = Map::<f32>::new(heightmap.radius, 0.0);
@@ -346,8 +334,6 @@ pub fn simulate_water(heightmap: &mut Map<f32>, rain_map: &Map<f32>, sea: &HashS
     (watermap, salt)
 }
 
-const NUTRIENT_NOISE_SCALE: f32 = 0.0015;
-
 // As a handwave, define soil nutrients to be partly randomized and partly based on water.
 // This kind of sort of makes sense because nitrogen is partly fixed by plants, which would have grown in water-having areas.
 // Update: they covaried way too much so reducing this.
@@ -377,13 +363,6 @@ struct WindSlice {
 fn august_roche_magnus(temperature: f32) -> f32 {
     6.1094 * f32::exp((17.625 * temperature) / (243.04 + temperature))
 }
-
-const BASE_TEMPERATURE: f32 = 30.0; // degrees
-const HEIGHT_SCALE: f32 = 1e3; // unrealistic but makes world more interesting; m
-//const SEA_LEVEL_AIR_PRESSURE: f32 = 1013.0; // hPa
-//const PRESSURE_DROP_PER_METER: f32 = 0.001; // hPa m^-1
-const AIR_SPECIFIC_HEAT_CAPACITY: f32 = 1012.0; // J kg^-1 K^-1
-const EARTH_GRAVITY: f32 = 9.81; // m s^-2
 
 pub fn simulate_air(heightmap: &Map<f32>, sea: &HashSet<Coord>, scan_dir: CoordVec, perpendicular_dir: CoordVec) -> (Map<f32>, Map<f32>, Map<f32>) {
     let radius = heightmap.radius;

@@ -805,8 +805,7 @@ dependencies = [
 [[package]]
 name = "hecs"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3a2d85ff28b1e1a1c183b6ca9ec1a6b97e7937fb989988a74d9db39760a07b8"
+source = "git+https://github.com/osmarks/hecs-patch#ba24338a7c95f4333609f7d20676d684b49dfe0f"
 dependencies = [
  "foldhash",
  "hashbrown",

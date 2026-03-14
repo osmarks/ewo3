@@ -4,5 +4,6 @@ pub mod plant;
 pub mod save;
 pub mod world_serde;
 pub mod worldgen;
+pub mod util;
 
 pub use components::*;

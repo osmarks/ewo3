@@ -8,6 +8,7 @@ use ewo3::map::*;
 use ewo3::save::SavedGame;
 use ewo3::world_serde;
 use ewo3::worldgen::*;
+use ewo3::util::config::*;
 use glow::HasContext;
 use glutin::config::ConfigTemplateBuilder;
 use glutin::context::{ContextAttributesBuilder, NotCurrentGlContext, PossiblyCurrentContext};
@@ -62,67 +63,71 @@ struct Args {
     window: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Field {
-    Height,
-    Rain,
-    Water,
-    Groundwater,
-    Salt,
-    Temperature,
-    Humidity,
-    Soil,
-    Contour,
-    SeaDistance,
-    Plants,
+macro_rules! define_fields {
+    (
+        $vis:vis enum $name:ident {
+            $(
+                $variant:ident => $str:literal
+            ),+ $(,)?
+        }
+    ) => {
+        #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+        $vis enum $name {
+            $(
+                $variant,
+            )+
+        }
+
+        const ALL_FIELDS: [$name; define_fields!(@count $($variant),+)] = [
+            $(
+                $name::$variant,
+            )+
+        ];
+
+        impl $name {
+            fn parse(s: &str) -> Result<Self> {
+                match s {
+                    $(
+                        $str => Ok(Self::$variant),
+                    )+
+                    _ => anyhow::bail!("unknown field: {s}"),
+                }
+            }
+
+            fn name(self) -> &'static str {
+                match self {
+                    $(
+                        Self::$variant => $str,
+                    )+
+                }
+            }
+        }
+    };
+
+    (@count $($variant:ident),+) => {
+        <[()]>::len(&[$(define_fields!(@unit $variant)),+])
+    };
+
+    (@unit $variant:ident) => { () };
 }
 
-const ALL_FIELDS: [Field; 11] = [
-    Field::Height,
-    Field::Rain,
-    Field::Water,
-    Field::Groundwater,
-    Field::Salt,
-    Field::Temperature,
-    Field::Humidity,
-    Field::Soil,
-    Field::Contour,
-    Field::SeaDistance,
-    Field::Plants,
-];
-
-impl Field {
-    fn parse(s: &str) -> Result<Self> {
-        match s {
-            "height" => Ok(Self::Height),
-            "rain" => Ok(Self::Rain),
-            "water" => Ok(Self::Water),
-            "groundwater" => Ok(Self::Groundwater),
-            "salt" => Ok(Self::Salt),
-            "temperature" => Ok(Self::Temperature),
-            "humidity" => Ok(Self::Humidity),
-            "soil" => Ok(Self::Soil),
-            "contour" => Ok(Self::Contour),
-            "sea_distance" => Ok(Self::SeaDistance),
-            "plants" => Ok(Self::Plants),
-            _ => anyhow::bail!("unknown field: {s}"),
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Field::Height => "height",
-            Field::Rain => "rain",
-            Field::Water => "water",
-            Field::Groundwater => "groundwater",
-            Field::Salt => "salt",
-            Field::Temperature => "temperature",
-            Field::Humidity => "humidity",
-            Field::Soil => "soil",
-            Field::Contour => "contour",
-            Field::SeaDistance => "sea_distance",
-            Field::Plants => "plants",
-        }
+define_fields! {
+    enum Field {
+        Height => "height",
+        Rain => "rain",
+        Water => "water",
+        Groundwater => "groundwater",
+        Salt => "salt",
+        Temperature => "temperature",
+        Humidity => "humidity",
+        Soil => "soil",
+        Contour => "contour",
+        SeaDistance => "sea_distance",
+        Plants => "plant_growth",
+        PlantsAge => "plant_age",
+        PlantsLifespanFraction => "plant_lifespan_fraction",
+        DynamicGroundwater => "dynamic_groundwater",
+        DynamicSoil => "dynamic_soil",
     }
 }
 
@@ -167,6 +172,10 @@ struct RenderData {
     contour_points: HashMap<Coord, u8>,
     sea_distance: Map<f32>,
     plants: Map<f32>,
+    plants_age: Map<f32>,
+    plants_lifespan_fraction: Map<f32>,
+    dynamic_groundwater: Map<f32>,
+    dynamic_soil: Map<f32>,
 }
 
 struct RenderedImage {
@@ -203,6 +212,10 @@ fn sample_field(field: Field, position: Coord, data: &RenderData) -> f32 {
         Field::Contour => data.contour_points.get(&position).copied().unwrap_or_default() as f32 / 255.0,
         Field::SeaDistance => data.sea_distance[position].clamp(0.0, 1.0),
         Field::Plants => data.plants[position],
+        Field::PlantsAge => data.plants_age[position],
+        Field::PlantsLifespanFraction => data.plants_lifespan_fraction[position],
+        Field::DynamicGroundwater => data.dynamic_groundwater[position],
+        Field::DynamicSoil => data.dynamic_soil[position],
     }
 }
 
@@ -234,11 +247,12 @@ fn to_rgb(c1: f32, c2: f32, c3: f32, color_space: ColorSpace) -> [u8; 3] {
 }
 
 fn build_derived_data(
-    world: &GeneratedWorld,
-    ecs_world: &World,
-    dynamic_groundwater: &Map<f32>,
-    dynamic_soil_nutrients: &Map<f32>,
-) -> (Map<f32>, Map<f32>, Map<f32>, Map<f32>, HashMap<Coord, u8>) {
+    world: GeneratedWorld,
+    ecs_world: World,
+    dynamic_groundwater: Map<f32>,
+    dynamic_soil_nutrients: Map<f32>,
+    positions: PositionIndex,
+) -> RenderData {
     let (sinks, sea) = get_sea(&world.heightmap);
 
     let mut sea_distance = distance_map(world.radius, sea.iter().copied());
@@ -265,6 +279,8 @@ fn build_derived_data(
     );
 
     let mut plants = Map::new(world.radius, 0.0f32);
+    let mut plants_age = Map::new(world.radius, 0.0f32);
+    let mut plants_lifespan_fraction = Map::new(world.radius, 0.0f32);
     for (position, plant) in ecs_world.query::<(&Position, &Plant)>().iter() {
         let pos = position.head();
         if !plants.in_range(pos) {
@@ -280,15 +296,24 @@ fn build_derived_data(
         if g > plants[pos] {
             plants[pos] = g;
         }
+        plants_age[pos] = plant.age as f32;
+        plants_lifespan_fraction[pos] = plant.age as f32 / (plant.genome.lifespan() * PLANT_LIFESPAN_SCALE);
     }
 
-    (
-        sea_distance,
+    RenderData {
+        world,
+        ecs_world,
+        positions,
         groundwater,
         soil,
+        contour_points,
+        sea_distance,
         plants,
-        contour_points
-    )
+        plants_age,
+        plants_lifespan_fraction,
+        dynamic_groundwater,
+        dynamic_soil: dynamic_soil_nutrients
+    }
 }
 
 fn rebuild_position_index(world: &World, radius: i32) -> PositionIndex {
@@ -307,22 +332,14 @@ fn load_render_data(args: &Args) -> Result<RenderData> {
         let ecs_world = world_serde::deserialize_world_from_bytes(&save.world)?;
         let positions = rebuild_position_index(&ecs_world, save.map.radius);
         let world = save.map;
-        let (sea_distance, groundwater, soil, plants, contour_points) = build_derived_data(
-            &world,
-            &ecs_world,
-            &save.dynamic_groundwater,
-            &save.dynamic_soil_nutrients,
-        );
-        Ok(RenderData {
+
+        Ok(build_derived_data(
             world,
             ecs_world,
-            positions,
-            groundwater,
-            soil,
-            contour_points,
-            sea_distance,
-            plants,
-        })
+            save.dynamic_groundwater,
+            save.dynamic_soil_nutrients,
+            positions
+        ))
     } else {
         let radius = args.radius.max(1);
         let mut heightmap = generate_heights_with_radius(radius);
@@ -361,17 +378,7 @@ fn load_render_data(args: &Args) -> Result<RenderData> {
         let ecs_world = World::new();
         let positions = PositionIndex::new(world.radius);
         let zero = Map::new(world.radius, 0.0f32);
-        let (sea_distance, groundwater, soil, plants, contour_points) = build_derived_data(&world, &ecs_world, &zero, &zero);
-        Ok(RenderData {
-            world,
-            ecs_world,
-            positions,
-            groundwater,
-            soil,
-            contour_points,
-            sea_distance,
-            plants,
-        })
+        Ok(build_derived_data(world, ecs_world, zero.clone(), zero, positions))
     }
 }
 
@@ -622,8 +629,8 @@ fn inspect_entity(data: &RenderData, entity: hecs::Entity, layer: MapLayer, ui: 
     }
     if let Ok(plant) = data.ecs_world.get::<&Plant>(entity) {
         ui.text(format!(
-            "  Plant: size={:.4} growth_ticks={} children={} ready_ticks={}",
-            plant.current_size, plant.growth_ticks, plant.children, plant.ready_for_reproduce_ticks
+            "  Plant: size={:.4} growth_ticks={} children={} ready_ticks={} age={}",
+            plant.current_size, plant.growth_ticks, plant.children, plant.ready_for_reproduce_ticks, plant.age
         ));
         ui.text(format!(
             "  Plant: nutrients_consumed={:.4} nutrients_added={:.4} water_consumed={:.4}",
@@ -741,7 +748,7 @@ fn run_window(data: RenderData, mut settings: RenderSettings) -> Result<()> {
 
                     ui.window("Controls")
                         .position([20.0, 20.0], Condition::FirstUseEver)
-                        .size([420.0, 420.0], Condition::FirstUseEver)
+                        .size([720.0, 420.0], Condition::FirstUseEver)
                         .build(|| {
                             ui.text(format!("radius: {}", data.world.radius));
 
@@ -855,7 +862,7 @@ fn run_window(data: RenderData, mut settings: RenderSettings) -> Result<()> {
                     let tid = map_texture_id.expect("texture id");
 
                     ui.window("Map")
-                        .position([460.0, 20.0], Condition::FirstUseEver)
+                        .position([760.0, 20.0], Condition::FirstUseEver)
                         .size(
                             [frame.width as f32 + 24.0, frame.height as f32 + 42.0],
                             Condition::FirstUseEver,
@@ -893,7 +900,7 @@ fn run_window(data: RenderData, mut settings: RenderSettings) -> Result<()> {
 
                     ui.window("Inspector")
                         .position([20.0, 460.0], Condition::FirstUseEver)
-                        .size([420.0, 460.0], Condition::FirstUseEver)
+                        .size([720.0, 660.0], Condition::FirstUseEver)
                         .build(|| {
                             ui.text("Field ranges:");
                             if settings.pca_fields.len() >= 2 {
@@ -947,7 +954,7 @@ fn run_window(data: RenderData, mut settings: RenderSettings) -> Result<()> {
                                 }
                                 for f in ALL_FIELDS {
                                     ui.text(format!(
-                                        "{:<12} {:>10.6}",
+                                        "{:<21} {:>10.6}",
                                         f.name(),
                                         sample_field(f, coord, &data)
                                     ));

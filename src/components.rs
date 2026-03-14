@@ -27,7 +27,8 @@ pub enum HealthChangeType {
     BluntForce,
     Magic,
     NaturalRegeneration,
-    Starvation
+    Starvation,
+    Senescence
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -389,6 +390,7 @@ pub struct Plant {
     pub growth_ticks: u64,
     pub children: u64,
     pub ready_for_reproduce_ticks: u64,
+    pub age: u64,
     pub total_growth: f32 // currently a bit redundant, given nutrient consumption counter
 }
 
@@ -403,12 +405,13 @@ impl Plant {
             growth_ticks: 0,
             children: 0,
             ready_for_reproduce_ticks: 0,
-            total_growth: 0.0
+            total_growth: 0.0,
+            age: 0
         }
     }
 
     pub fn can_reproduce(&self) -> bool {
-        self.current_size >= self.genome.max_size() * self.genome.reproductive_size_fraction()
+        self.current_size >= self.genome.mature_size()
     }
 }
 
